@@ -1,0 +1,14 @@
+# Nested upstream git repos — tracked separately
+EvilCrow-RF/
+EvilCrowRF-V2/
+
+# Build artifacts
+build/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log

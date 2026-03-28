@@ -1,0 +1,46 @@
+# Evil Crow RF — Script de ejemplo: RX + stoprx + log
+#
+# Uso:
+#   python3 ~/evilcrow/ecrf-serial.py --script ~/evilcrow/scripts/example.ecrf
+#   python3 ~/evilcrow/ecrf-serial.py --script ~/evilcrow/scripts/example.ecrf --delay 1500
+#   python3 ~/evilcrow/ecrf-serial.py --script ~/evilcrow/scripts/example.ecrf --port /dev/ttyUSB0
+#
+# Directivas disponibles en .ecrf:
+#   # delay <ms>     fija el delay entre comandos (ms)
+#   # wait <s>       pausa sin enviar comando (util para esperar captura RF)
+#   # timeout <s>    timeout de respuesta para el SIGUIENTE comando
+#   <comando>        cualquier comando del firmware Evil Crow RF
+#
+# El log se guarda automaticamente en example.log (mismo directorio)
+# ---------------------------------------------------------------------
+
+# Delay de 1 segundo entre comandos
+# delay 1000
+
+# ---- Estado inicial del dispositivo ----
+status
+
+# ---- Configuracion CC1101 activa ----
+config
+
+# ---- Iniciar recepcion ----
+# Modulo 1, 433.92 MHz, BW=812 kHz, ASK/OOK (mod=0), desv=47.6 kHz, rate=4 kbps
+rx 1 433.92 812 0 47.6 4
+
+# Esperar 5 segundos para captura de senal RF
+# (durante la espera los eventos RX del dispositivo se loguean como ASYNC)
+# wait 5
+
+# ---- Detener recepcion ----
+stoprx
+
+# ---- Consultar frecuencia activa del modulo 1 ----
+freqw 1
+
+# ---- Mostrar log capturado en flash ----
+# Aumentar timeout porque el log puede ser largo
+# timeout 10
+log
+
+# ---- Estado final ----
+status

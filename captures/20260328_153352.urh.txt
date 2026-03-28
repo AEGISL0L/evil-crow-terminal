@@ -1,0 +1,5 @@
+# Evil-Crow-RF export format=URH
+# freq_mhz=433.92000
+# modulation=0
+# samples=10
++300 -900 +300 -900 +300 -900 +300 -900 +300 -900
