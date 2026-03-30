@@ -6,7 +6,7 @@ desde terminal USB/serie, sin necesidad de WiFi ni panel web.
 Basado en el firmware original de
 [joelsernamoreno/EvilCrowRF-V2](https://github.com/joelsernamoreno/EvilCrowRF-V2).
 
-**Versión del firmware:** v2.7 | **Cliente Python:** ecrf-serial.py v2.1
+**Versión del firmware:** v2.8 | **Cliente Python:** ecrf-serial.py v2.1
 
 ---
 
@@ -258,7 +258,7 @@ minicom -b 115200 -D /dev/ttyUSB0
 Al conectar verás:
 
 ```
-{"event":"ready","fw":"2.7","msg":"Evil Crow RF listo","hint":"Escribe help"}
+{"event":"ready","fw":"2.8","msg":"Evil Crow RF listo","hint":"Escribe help"}
 ECRF>
 ```
 
@@ -366,7 +366,7 @@ info                                Espacio total, usado y libre de LittleFS
 save <name>                         (mejorado en v2.6)
   Avisa con OK: save overwriting existing path=… antes de sobreescribir
 
-autodetect <module> <freq>          Detectar modulación y BW automáticamente
+autodetect <module> <freq>          Detectar modulación y BW automáticamente (v2.7)
   module: 1 | 2
   freq:   MHz  ej: 433.92
   Prueba 4 modulaciones × 3 BW = 12 combinaciones:
@@ -379,6 +379,23 @@ autodetect <module> <freq>          Detectar modulación y BW automáticamente
     datarate, tmp_module) — replay/analyze/export quedan listos sin configurar
   Si no encuentra: ERR: autodetect no_signal_found freq=…
   Emite AUTODETECT-LISTO al finalizar con éxito
+
+brute <module> <freq> <bits> <delay_ms>   Transmitir todos los códigos posibles (v2.8)
+  module:   1 | 2
+  freq:     MHz  ej: 433.92
+  bits:     1–24  (máximo 24 = 16 777 216 códigos)   ERR: si bits > 24
+  delay_ms: pausa en ms entre transmisiones  (0 = sin pausa)
+  Encoding OOK MSB primero:
+    bit 1 → 600 µs HIGH + 200 µs LOW
+    bit 0 → 200 µs HIGH + 600 µs LOW
+  Usa la modulación activa (modulationMode); configura antes con 'load' o 'config'
+  Emite cada 1000 códigos: BRUTE: <n>/<total> ultimo=0xHHHHHH
+  Emite JSON {"event":"brute_started"} al comenzar
+  Emite BRUTE-LISTO al finalizar (completo o detenido con 'stopbrute')
+
+stopbrute                           Detiene un brute en curso
+  Escribe 'stopbrute' mientras brute está ejecutándose
+  También funciona como comando normal si brute ya terminó (no-op)
 ```
 
 El cliente Python detecta automáticamente los bloques `[EXPORT-*-BEGIN/END]`
@@ -468,6 +485,15 @@ ECRF> autodetect 2 868.35
 # Tras FOUND: replay y analyze usan los globals actualizados
 ECRF> replay 1
 ECRF> analyze 2
+
+# Brute force 12 bits en 433 MHz con 50 ms entre códigos (4096 códigos)
+ECRF> brute 1 433.92 12 50
+
+# Brute force 16 bits sin pausa (65536 códigos, ~52 s con 800 µs/código)
+ECRF> brute 1 433.92 16 0
+
+# Detener brute mientras está ejecutándose (escribir durante la ejecución)
+ECRF> stopbrute
 ```
 
 ---
@@ -600,6 +626,50 @@ DBG:   STATUS[0x35]=0x0D (MARCSTATE)
 Operaciones trazadas: `Init`, `setMHZ`, `setModulation`, `setRxBW`, `setDRate`,
 `setDeviation`, `setSyncMode`, `setPktFormat`, `setDcFilterOff`, `setPA`,
 `SetRx`, `SetTx`, `setSidle`.
+
+### Brute force (`brute`, `stopbrute`)
+
+Inicio y progreso:
+
+```
+ECRF> brute 1 433.92 12 50
+OK: brute module=1 freq=433.92000 bits=12 total=4096 delay_ms=50
+{"event":"brute_started"}
+BRUTE: 1/4096 ultimo=0x000000
+BRUTE: 1000/4096 ultimo=0x0003E7
+BRUTE: 2000/4096 ultimo=0x0007CF
+BRUTE: 3000/4096 ultimo=0x000BB7
+BRUTE: 4000/4096 ultimo=0x000F9F
+OK: brute done total=4096
+BRUTE-LISTO
+```
+
+Detenido con `stopbrute` durante la ejecución:
+
+```
+BRUTE: 1000/65536 ultimo=0x0003E7
+BRUTE: 2000/65536 ultimo=0x0007CF
+stopbrute
+OK: brute stopped at=2347/65536
+BRUTE-LISTO
+```
+
+Error por bits > 24:
+
+```
+ECRF> brute 1 433.92 25 10
+ERR: brute bits>24 max=24 requested=25
+```
+
+**Tiempo estimado** por número de bits (delay_ms=0, 800 µs por código):
+
+| bits | códigos | tiempo aprox. |
+|------|---------|---------------|
+| 8 | 256 | ~0.2 s |
+| 12 | 4 096 | ~3.3 s |
+| 16 | 65 536 | ~52 s |
+| 20 | 1 048 576 | ~14 min |
+| 24 | 16 777 216 | ~3.7 h |
 
 ### Autodetect (`autodetect`)
 
@@ -806,9 +876,9 @@ evilcrow/
 │   ├── firmware.ino.bin             Binario listo para flashear
 │   ├── firmware.ino.bootloader.bin
 │   └── firmware.ino.partitions.bin
-├── EvilCrow-RF/                     Firmware v2.7 (modificado)
+├── EvilCrow-RF/                     Firmware v2.8 (modificado)
 │   └── firmware/
-│       ├── firmware.ino             ← Sketch principal v2.7
+│       ├── firmware.ino             ← Sketch principal v2.8
 │       ├── ELECHOUSE_CC1101_SRC_DRV.h
 │       └── ELECHOUSE_CC1101_SRC_DRV.cpp
 └── EvilCrowRF-V2/                   Repo V2 original (referencia)
@@ -832,6 +902,7 @@ evilcrow/
 | v2.5 | Comandos `relay` y `bridge`: modo dual-radio — Módulo 1 como receptor, Módulo 2 como transmisor simultáneo; `relay` opera en la misma frecuencia, `bridge` entre dos frecuencias distintas; cada paquete retransmitido emite `OK: RELAY <pulsos>`; ambos modos se detienen con `stoprx`; campo `relay` añadido al evento `status` |
 | v2.6 | Gestión completa de archivos LittleFS: `list` (nombre + tamaño + fecha ISO-8601 en bloque `[LIST-BEGIN/END]`), `show <name>` (volcado raw entre `[FILE-BEGIN/END]`), `delete <name>`, `rename <old> <new>` (ERR si dst existe), `info` (espacio total/used/free/pct + JSON `fs_info`); `save <name>` mejorado: avisa con `OK: save overwriting` antes de sobreescribir; `#include <time.h>` para formato de fecha en `list` |
 | v2.7 | Comando `autodetect <module> <freq>`: descubrimiento automático de modulación y BW — prueba 4 modulaciones (OOK → 2-FSK → 4-FSK → GFSK) × 3 anchos de banda (812 → 406 → 203 kHz) = 12 combinaciones, timeout 3 s por combo; emite `TRY: mod=X bw=Y` en cada intento, `FOUND: mod=X bw=Y rate=Z` + JSON `autodetect_found` al capturar señal, `AUTODETECT-LISTO` como marcador de finalización; actualiza globals automáticamente para que `replay`/`analyze`/`export` funcionen sin configuración adicional; corrección: `detachInterrupt(rx_pin)` incondicional para evitar interrupt colgado en módulo 2 al capturar con `relayActive=true` |
+| v2.8 | Comandos `brute <module> <freq> <bits> <delay_ms>` y `stopbrute`: transmisor de fuerza bruta — genera y transmite secuencialmente todos los 2^bits códigos posibles (máx. 24 bits = 16 777 216 códigos) con encoding OOK MSB primero (bit1=600µs/200µs, bit0=200µs/600µs); progreso cada 1000 códigos con `BRUTE: n/total ultimo=0xHHH`; `stopbrute` detectable durante el loop vía polling Serial en cada pausa inter-código; `yield()` por iteración para compatibilidad con WDT de FreeRTOS; `ERR:` si bits > 24; emite `BRUTE-LISTO` al finalizar (completo o detenido) |
 
 El detalle de los 20 gaps resueltos y las optimizaciones de memoria están en [`GAPS.md`](GAPS.md).
 
@@ -941,3 +1012,29 @@ sudo usermod -aG dialout $USER
 - Verifica que el módulo 2 responde con `config` (campo `cc1101_module2=present`)
 - `autodetect` usa `relayActive=true` internamente para suprimir el dual-pin check;
   si el módulo 2 no inicializa (`getCC1101()` falla), el comando aborta con `ERR: cc1101_no_response`
+
+**`brute` no transmite / el receptor no detecta nada**
+- Confirma que la modulación activa es OOK (mod=2): usa `load <perfil>` o configura con `rx`
+  antes de ejecutar brute; brute usa `modulationMode` global tal como está
+- Verifica la frecuencia con un SDR antes de bruteforcear; ±0.1 MHz puede ser suficiente
+  para quedar fuera del ancho de banda del receptor objetivo
+- El encoding (600/200 µs) es genérico; algunos receptores esperan timings distintos —
+  en ese caso usa `tx` con los timings exactos en lugar de `brute`
+
+**`brute 1 433.92 24 0` bloquea la CLI durante ~3.7 horas**
+- Comportamiento esperado: brute es síncrono y bloquea `loop()` hasta completar
+- Para detenerlo escribe `stopbrute` + Enter en el terminal serie durante la ejecución;
+  el firmware lo detecta en el polling Serial del inter-código
+- Con `delay_ms=0` el polling se ejecuta igualmente (el bucle de espera corre al menos
+  una vez antes de salir), por lo que `stopbrute` funciona incluso sin pausa
+
+**`stopbrute` no detiene el brute inmediatamente**
+- El firmware solo comprueba Serial al final de cada código transmitido (en la pausa)
+- Con `delay_ms=0` la reacción es prácticamente inmediata (<1 ms de latencia)
+- Con `delay_ms=5000` el brute termina el código en curso, espera hasta 5 s leyendo
+  Serial, y se detiene en cuanto detecta el `stopbrute`; la respuesta puede tardar
+  hasta `delay_ms` ms
+
+**`ERR: brute bits_out_of_range` con bits=24**
+- bits=24 es válido (2^24 = 16 777 216 códigos); el error solo salta con bits > 24 o bits < 1
+- Comprueba que no hay espacios extra en el comando: `brute 1 433.92 24 0`
