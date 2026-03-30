@@ -1,5 +1,6 @@
 // Evil Crow RF - Firmware con CLI Serie (sin WiFi)
 // Basado en: https://github.com/joelsernamoreno/EvilCrow-RF
+// v2.8 - brute force transmitter
 // v2.7 - autodetect
 // v2.6 - storage management completo (list/show/delete/rename/info)
 // v2.5 - relay/bridge dual-radio mode
@@ -114,6 +115,9 @@ const int SCAN_MAX_STEPS = 500;
 volatile bool relayActive = false;  // true mientras relay o bridge esten activos
 float         relayTxFreq = 0.0;    // freq TX (relay: igual que RX; bridge: distinta)
 int           relayTxMod  = 0;      // modulacion TX para relay/bridge
+
+// v2.8: brute force mode
+volatile bool bruteActive = false;  // true mientras brute esta transmitiendo
 
 // File
 File logs;
@@ -668,7 +672,7 @@ void relayTransmit(int pulseCount) {
 // ============================================================
 
 void printHelp() {
-  Serial.println(F("\n=== Evil Crow RF - Serial CLI v2.7 ==="));
+  Serial.println(F("\n=== Evil Crow RF - Serial CLI v2.8 ==="));
   Serial.println(F("  help"));
   Serial.println(F("  status"));
   Serial.println(F("  rx <module> <freq> <bw> <modulation> <deviation> <datarate>"));
@@ -737,6 +741,16 @@ void printHelp() {
   Serial.println(F("    Timeout 3 s por combinacion; max 12 intentos (~36 s)"));
   Serial.println(F("    Si encuentra senal actualiza globals (replay/analyze listos)"));
   Serial.println(F("    Si no encuentra: ERR: autodetect no_signal_found"));
+  Serial.println(F("--- Nuevos en v2.8 ---"));
+  Serial.println(F("  brute <module> <freq> <bits> <delay_ms>"));
+  Serial.println(F("    Transmite todos los codigos de bits bits (max 24 = 16M codigos)"));
+  Serial.println(F("    mod: 1|2  freq: MHz  bits: 1-24  delay_ms: pausa entre codigos"));
+  Serial.println(F("    Encoding OOK: bit1=600us/200us  bit0=200us/600us  MSB primero"));
+  Serial.println(F("    Emite cada 1000 codigos: BRUTE: <n>/<total> ultimo=0xHHH"));
+  Serial.println(F("    Detener con 'stopbrute' durante la ejecucion"));
+  Serial.println(F("    Emite BRUTE-LISTO al finalizar (completo o detenido)"));
+  Serial.println(F("    ERR: si bits>24 para evitar ejecuciones infinitas"));
+  Serial.println(F("  stopbrute                         Detiene brute en curso"));
   Serial.println(F("==========================================\n"));
 }
 
@@ -1664,6 +1678,115 @@ void cmdAutodetect(const String &modToken, float freq) {
   }
 }
 
+// brute <module> <freq> <bits> <delay_ms>: transmite todos los codigos de bits bits
+void cmdBrute(const String &modToken, float freq, int bits, unsigned long delayMs) {
+  if (bits < 1 || bits > 24) {
+    Serial.print(F("ERR: brute bits_out_of_range requested="));
+    Serial.print(bits);
+    Serial.println(F(" max=24"));
+    return;
+  }
+
+  int moduleIdx = parseModuleIndex(modToken);
+  if (moduleIdx < 0) return;
+  if (!checkCC1101Module(moduleIdx)) return;
+
+  unsigned long total = 1UL << bits;   // 2^bits codigos
+  int tx_pin = (moduleIdx == 0) ? tx_pin1 : tx_pin2;
+
+  // Configurar CC1101 para TX con modulacion activa a la freq indicada
+  ELECHOUSE_cc1101.setModul(moduleIdx);
+  cc1101Init();
+  cc1101SetModulation(modulationMode);
+  cc1101SetMHZ(freq);
+  cc1101SetTx();
+  pinMode(tx_pin, OUTPUT);
+  digitalWrite(tx_pin, LOW);
+
+  Serial.print(F("OK: brute module="));  Serial.print(modToken);
+  Serial.print(F(" freq="));             Serial.print(freq, 5);
+  Serial.print(F(" bits="));             Serial.print(bits);
+  Serial.print(F(" total="));            Serial.print(total);
+  Serial.print(F(" delay_ms="));         Serial.println(delayMs);
+  Serial.println(F("{\"event\":\"brute_started\"}"));
+
+  bruteActive = true;
+
+  // Buffer local para leer "stopbrute" desde Serial durante el loop
+  char  stopBuf[16];
+  int   stopPos = 0;
+  memset(stopBuf, 0, sizeof(stopBuf));
+
+  // Timing OOK: bit1 = pulso largo, bit0 = pulso corto (MSB primero)
+  const unsigned int T1H = 600;  // us HIGH para bit 1
+  const unsigned int T1L = 200;  // us LOW  para bit 1
+  const unsigned int T0H = 200;  // us HIGH para bit 0
+  const unsigned int T0L = 600;  // us LOW  para bit 0
+
+  unsigned long n = 0;
+  for (n = 0; n < total && bruteActive; n++) {
+    // --- Transmitir codigo n (MSB primero) ---
+    for (int b = bits - 1; b >= 0; b--) {
+      if ((n >> b) & 1UL) {
+        digitalWrite(tx_pin, HIGH); delayMicroseconds(T1H);
+        digitalWrite(tx_pin, LOW);  delayMicroseconds(T1L);
+      } else {
+        digitalWrite(tx_pin, HIGH); delayMicroseconds(T0H);
+        digitalWrite(tx_pin, LOW);  delayMicroseconds(T0L);
+      }
+    }
+    digitalWrite(tx_pin, LOW);  // estado final LOW
+
+    // --- Progreso cada 1000 codigos (y en el primero) ---
+    if (n == 0 || (n + 1) % 1000 == 0) {
+      char hexbuf[8];
+      snprintf(hexbuf, sizeof(hexbuf), "%06X", (unsigned int)n);
+      Serial.print(F("BRUTE: "));
+      Serial.print(n + 1);
+      Serial.print('/');
+      Serial.print(total);
+      Serial.print(F(" ultimo=0x"));
+      Serial.println(hexbuf);
+    }
+
+    // --- Delay entre codigos + polling Serial para stopbrute ---
+    unsigned long t0 = millis();
+    for (;;) {
+      while (Serial.available()) {
+        char c = (char)tolower(Serial.read());
+        if (c == '\n' || c == '\r') {
+          stopBuf[stopPos] = '\0';
+          if (strcmp(stopBuf, "stopbrute") == 0) {
+            bruteActive = false;
+          }
+          stopPos = 0;
+        } else if (stopPos < (int)sizeof(stopBuf) - 1) {
+          stopBuf[stopPos++] = c;
+        }
+      }
+      if (!bruteActive) break;
+      if (millis() - t0 >= delayMs) break;
+      delay(1);
+    }
+    yield();  // cede al scheduler FreeRTOS; previene WDT reset
+  }
+
+  digitalWrite(tx_pin, LOW);
+  cc1101SetSidle();
+  bruteActive = false;
+
+  if (n >= total) {
+    Serial.print(F("OK: brute done total="));
+    Serial.println(total);
+  } else {
+    Serial.print(F("OK: brute stopped at="));
+    Serial.print(n);
+    Serial.print('/');
+    Serial.println(total);
+  }
+  Serial.println(F("BRUTE-LISTO"));
+}
+
 // ============================================================
 // Parser de comandos serie
 // ============================================================
@@ -2010,6 +2133,26 @@ void processSerialCommand(String cmd) {
       cmdAutodetect(tokens[1], tokens[2].toFloat());
     }
 
+  // ---- Comandos nuevos v2.8 (brute force) ----
+
+  } else if (command == "brute") {
+    if (tokenCount < 5) {
+      Serial.println(F("ERR: brute usage: brute <module> <freq_MHz> <bits> <delay_ms>"));
+      Serial.println(F("ERR: brute example: brute 1 433.92 12 50"));
+    } else {
+      int bits = tokens[3].toInt();
+      if (bits > 24) {
+        Serial.print(F("ERR: brute bits>24 max=24 requested="));
+        Serial.println(bits);
+      } else {
+        cmdBrute(tokens[1], tokens[2].toFloat(), bits, (unsigned long)tokens[4].toInt());
+      }
+    }
+
+  } else if (command == "stopbrute") {
+    bruteActive = false;
+    Serial.println(F("OK: stopbrute signal_sent"));
+
   } else {
     Serial.print(F("{\"status\":\"error\",\"cmd\":\"unknown\",\"input\":\""));
     Serial.print(command);
@@ -2060,7 +2203,7 @@ void setup() {
   ELECHOUSE_cc1101.addSpiPin(sck_pin, miso_pin, mosi_pin, cs_pin2, 1);
 
   // GAP-17: NO enableReceive() en setup — el usuario usa 'rx' para iniciar
-  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.7\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
+  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.8\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
   Serial.print(F("ECRF> "));
 }
 
