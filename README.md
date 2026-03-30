@@ -6,7 +6,7 @@ desde terminal USB/serie, sin necesidad de WiFi ni panel web.
 Basado en el firmware original de
 [joelsernamoreno/EvilCrowRF-V2](https://github.com/joelsernamoreno/EvilCrowRF-V2).
 
-**Versión del firmware:** v2.5 | **Cliente Python:** ecrf-serial.py v2.1
+**Versión del firmware:** v2.6 | **Cliente Python:** ecrf-serial.py v2.1
 
 ---
 
@@ -258,7 +258,7 @@ minicom -b 115200 -D /dev/ttyUSB0
 Al conectar verás:
 
 ```
-{"event":"ready","fw":"2.5","msg":"Evil Crow RF listo","hint":"Escribe help"}
+{"event":"ready","fw":"2.6","msg":"Evil Crow RF listo","hint":"Escribe help"}
 ECRF>
 ```
 
@@ -344,6 +344,27 @@ bridge <rx_freq> <tx_freq>          Relay entre dos frecuencias distintas
   Módulo 1 escucha a rx_freq, Módulo 2 retransmite a tx_freq
   Usa mod/bw/dev/rate actuales (configura primero con 'load' o 'config')
   Se detiene con 'stoprx'
+
+list                                Lista todos los archivos en LittleFS
+  Formato: <name> size=N date=ISO  encerrado en [LIST-BEGIN] … [LIST-END count=N]
+  La fecha es UTC; sin RTC/NTP puede mostrar 1970-01-01
+
+show <name>                         Vuelca el contenido raw de un archivo al Serial
+  Encerrado en [FILE-BEGIN path=X size=N] … [FILE-END]
+  name sin / inicial se completa automáticamente con /
+
+delete <name>                       Elimina un archivo de LittleFS
+  ERR si el archivo no existe
+
+rename <old> <new>                  Renombra un archivo en LittleFS
+  ERR si src no existe o dst ya existe
+
+info                                Espacio total, usado y libre de LittleFS
+  Emite OK: info total=… used=… free=… used_pct=… files=N
+  y JSON {"event":"fs_info",…}
+
+save <name>                         (mejorado en v2.6)
+  Avisa con OK: save overwriting existing path=… antes de sobreescribir
 ```
 
 El cliente Python detecta automáticamente los bloques `[EXPORT-*-BEGIN/END]`
@@ -405,6 +426,24 @@ ECRF> bridge 433.92 868.35
 
 # Detener relay o bridge
 ECRF> stoprx
+
+# Listar archivos guardados en LittleFS
+ECRF> list
+
+# Ver contenido de un archivo de configuración
+ECRF> show cfg_garaje433.cfg
+
+# Borrar un archivo
+ECRF> delete cfg_garaje433.cfg
+
+# Renombrar un archivo
+ECRF> rename cfg_garaje433.cfg cfg_garaje_nuevo.cfg
+
+# Ver espacio libre en flash
+ECRF> info
+
+# Guardar config — avisa si ya existe
+ECRF> save garaje433
 ```
 
 ---
@@ -537,6 +576,38 @@ DBG:   STATUS[0x35]=0x0D (MARCSTATE)
 Operaciones trazadas: `Init`, `setMHZ`, `setModulation`, `setRxBW`, `setDRate`,
 `setDeviation`, `setSyncMode`, `setPktFormat`, `setDcFilterOff`, `setPA`,
 `SetRx`, `SetTx`, `setSidle`.
+
+### Storage management (`list`, `show`, `delete`, `rename`, `info`)
+
+```
+[LIST-BEGIN]
+/logs.txt size=4096 date=2026-03-30T12:00:00
+/cfg_garaje433.cfg size=82 date=2026-03-30T11:45:00
+[LIST-END count=2]
+OK: list files=2
+```
+
+```
+[FILE-BEGIN path=/cfg_garaje433.cfg size=82]
+freq=433.920000
+bw=812.000
+mod=2
+dev=47.600
+rate=4
+power=10
+module=1
+
+[FILE-END]
+OK: show path=/cfg_garaje433.cfg size=82
+```
+
+```
+OK: deleted path=/cfg_garaje433.cfg
+OK: renamed /cfg_garaje433.cfg -> /cfg_garaje_nuevo.cfg
+OK: save overwriting existing path=/cfg_garaje433.cfg
+OK: info total=1441792 used=4096 free=1437696 used_pct=0 files=2
+{"event":"fs_info","total":1441792,"used":4096,"free":1437696,"used_pct":0,"files":2}
+```
 
 ### Volcado de registros (`registers`)
 
@@ -672,9 +743,9 @@ evilcrow/
 │   ├── firmware.ino.bin             Binario listo para flashear
 │   ├── firmware.ino.bootloader.bin
 │   └── firmware.ino.partitions.bin
-├── EvilCrow-RF/                     Firmware v2.5 (modificado)
+├── EvilCrow-RF/                     Firmware v2.6 (modificado)
 │   └── firmware/
-│       ├── firmware.ino             ← Sketch principal v2.5
+│       ├── firmware.ino             ← Sketch principal v2.6
 │       ├── ELECHOUSE_CC1101_SRC_DRV.h
 │       └── ELECHOUSE_CC1101_SRC_DRV.cpp
 └── EvilCrowRF-V2/                   Repo V2 original (referencia)
@@ -696,6 +767,7 @@ evilcrow/
 | v2.3 | Comando `debug on/off`: traza SPI de todas las operaciones CC1101 con registro enviado y valor leído de vuelta, prefijo `DBG:`; comando `registers <mod>`: volcado de los 47 registros de configuración CC1101 en formato `REG[0xNN]=0xVV NOMBRE` |
 | v2.4 | Comando `meminfo`: reporte en tiempo real de heap libre, mínimo histórico, fragmentación, stack HWM y uso de LittleFS; optimizaciones internas de heap: `String` con `+=` en loops reemplazadas por `static char[]`/`snprintf`/`File::print()` directo, eliminando hasta 2000 allocaciones de heap por captura |
 | v2.5 | Comandos `relay` y `bridge`: modo dual-radio — Módulo 1 como receptor, Módulo 2 como transmisor simultáneo; `relay` opera en la misma frecuencia, `bridge` entre dos frecuencias distintas; cada paquete retransmitido emite `OK: RELAY <pulsos>`; ambos modos se detienen con `stoprx`; campo `relay` añadido al evento `status` |
+| v2.6 | Gestión completa de archivos LittleFS: `list` (nombre + tamaño + fecha ISO-8601 en bloque `[LIST-BEGIN/END]`), `show <name>` (volcado raw entre `[FILE-BEGIN/END]`), `delete <name>`, `rename <old> <new>` (ERR si dst existe), `info` (espacio total/used/free/pct + JSON `fs_info`); `save <name>` mejorado: avisa con `OK: save overwriting` antes de sobreescribir; `#include <time.h>` para formato de fecha en `list` |
 
 El detalle de los 20 gaps resueltos y las optimizaciones de memoria están en [`GAPS.md`](GAPS.md).
 
@@ -769,3 +841,19 @@ sudo usermod -aG dialout $USER
 **`meminfo` muestra `fs=unavailable`**
 - LittleFS no pudo montarse — prueba `reboot` para que `setup()` intente formatearlo
 - Si persiste, el flash puede estar dañado; reflashea el firmware completo
+
+**`list` muestra fechas `1970-01-01T00:00:00`**
+- El ESP32 no tiene RTC ni NTP en este firmware, por lo que `getLastWrite()` devuelve
+  epoch (0) al crear archivos; la fecha no es fiable sin fuente de tiempo externa
+
+**`rename` devuelve `ERR: rename dst_exists`**
+- El archivo destino ya existe — bórralo primero con `delete <new>` o elige otro nombre
+
+**`show` o `delete` devuelven `ERR: file_not_found`**
+- Usa `list` para ver los nombres exactos (con ruta completa como `/cfg_name.cfg`)
+- Los nombres sin `/` inicial se completan automáticamente; los nombres con extensión
+  incorrecta no coincidirán
+
+**`info` muestra `used_pct=0` aunque haya archivos**
+- Es correcto: LittleFS reserva bloques en potencias de 2; unos pocos archivos pequeños
+  apenas ocupan el 1 % del espacio total (~1.4 MB en el ESP32 con partición típica
