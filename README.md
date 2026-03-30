@@ -6,7 +6,7 @@ desde terminal USB/serie, sin necesidad de WiFi ni panel web.
 Basado en el firmware original de
 [joelsernamoreno/EvilCrowRF-V2](https://github.com/joelsernamoreno/EvilCrowRF-V2).
 
-**Versión del firmware:** v2.6 | **Cliente Python:** ecrf-serial.py v2.1
+**Versión del firmware:** v2.7 | **Cliente Python:** ecrf-serial.py v2.1
 
 ---
 
@@ -258,7 +258,7 @@ minicom -b 115200 -D /dev/ttyUSB0
 Al conectar verás:
 
 ```
-{"event":"ready","fw":"2.6","msg":"Evil Crow RF listo","hint":"Escribe help"}
+{"event":"ready","fw":"2.7","msg":"Evil Crow RF listo","hint":"Escribe help"}
 ECRF>
 ```
 
@@ -365,6 +365,20 @@ info                                Espacio total, usado y libre de LittleFS
 
 save <name>                         (mejorado en v2.6)
   Avisa con OK: save overwriting existing path=… antes de sobreescribir
+
+autodetect <module> <freq>          Detectar modulación y BW automáticamente
+  module: 1 | 2
+  freq:   MHz  ej: 433.92
+  Prueba 4 modulaciones × 3 BW = 12 combinaciones:
+    mod: OOK(2) → 2-FSK(0) → 4-FSK(3) → GFSK(1)
+    bw:  812 → 406 → 203 kHz
+  Emite TRY: mod=X bw=Y por cada combinación probada
+  Emite FOUND: mod=X bw=Y rate=Z y JSON autodetect_found al capturar
+  Timeout 3 s por combinación (máx ~36 s en total)
+  Si encuentra señal: actualiza globals (modulationMode, setrxbw, frequency,
+    datarate, tmp_module) — replay/analyze/export quedan listos sin configurar
+  Si no encuentra: ERR: autodetect no_signal_found freq=…
+  Emite AUTODETECT-LISTO al finalizar con éxito
 ```
 
 El cliente Python detecta automáticamente los bloques `[EXPORT-*-BEGIN/END]`
@@ -444,6 +458,16 @@ ECRF> info
 
 # Guardar config — avisa si ya existe
 ECRF> save garaje433
+
+# Autodetectar modulación y BW en 433 MHz (pulsa el mando durante el scan)
+ECRF> autodetect 1 433.92
+
+# Autodetectar en 868 MHz con módulo 2
+ECRF> autodetect 2 868.35
+
+# Tras FOUND: replay y analyze usan los globals actualizados
+ECRF> replay 1
+ECRF> analyze 2
 ```
 
 ---
@@ -576,6 +600,45 @@ DBG:   STATUS[0x35]=0x0D (MARCSTATE)
 Operaciones trazadas: `Init`, `setMHZ`, `setModulation`, `setRxBW`, `setDRate`,
 `setDeviation`, `setSyncMode`, `setPktFormat`, `setDcFilterOff`, `setPA`,
 `SetRx`, `SetTx`, `setSidle`.
+
+### Autodetect (`autodetect`)
+
+Flujo cuando encuentra señal:
+
+```
+ECRF> autodetect 1 433.92
+TRY: mod=2 bw=812
+TRY: mod=2 bw=406
+FOUND: mod=2 bw=406 rate=4
+{"event":"autodetect_found","mod":2,"bw":406,"rate":4,"freq":433.92000,"samples":128}
+AUTODETECT-LISTO
+```
+
+Flujo cuando no hay señal (se agotan las 12 combinaciones):
+
+```
+TRY: mod=2 bw=812
+TRY: mod=2 bw=406
+TRY: mod=2 bw=203
+TRY: mod=0 bw=812
+TRY: mod=0 bw=406
+TRY: mod=0 bw=203
+TRY: mod=3 bw=812
+TRY: mod=3 bw=406
+TRY: mod=3 bw=203
+TRY: mod=1 bw=812
+TRY: mod=1 bw=406
+TRY: mod=1 bw=203
+ERR: autodetect no_signal_found freq=433.92000
+```
+
+| Campo JSON | Descripción |
+|-----------|-------------|
+| `mod` | Modulación detectada: 0=2-FSK, 1=GFSK, 2=OOK, 3=4-FSK |
+| `bw` | Ancho de banda en kHz: 203, 406 o 812 |
+| `rate` | Data rate fijo de prueba: 4 kbps |
+| `freq` | Frecuencia configurada (MHz) |
+| `samples` | Número de muestras capturadas por el ISR |
 
 ### Storage management (`list`, `show`, `delete`, `rename`, `info`)
 
@@ -743,9 +806,9 @@ evilcrow/
 │   ├── firmware.ino.bin             Binario listo para flashear
 │   ├── firmware.ino.bootloader.bin
 │   └── firmware.ino.partitions.bin
-├── EvilCrow-RF/                     Firmware v2.6 (modificado)
+├── EvilCrow-RF/                     Firmware v2.7 (modificado)
 │   └── firmware/
-│       ├── firmware.ino             ← Sketch principal v2.6
+│       ├── firmware.ino             ← Sketch principal v2.7
 │       ├── ELECHOUSE_CC1101_SRC_DRV.h
 │       └── ELECHOUSE_CC1101_SRC_DRV.cpp
 └── EvilCrowRF-V2/                   Repo V2 original (referencia)
@@ -768,6 +831,7 @@ evilcrow/
 | v2.4 | Comando `meminfo`: reporte en tiempo real de heap libre, mínimo histórico, fragmentación, stack HWM y uso de LittleFS; optimizaciones internas de heap: `String` con `+=` en loops reemplazadas por `static char[]`/`snprintf`/`File::print()` directo, eliminando hasta 2000 allocaciones de heap por captura |
 | v2.5 | Comandos `relay` y `bridge`: modo dual-radio — Módulo 1 como receptor, Módulo 2 como transmisor simultáneo; `relay` opera en la misma frecuencia, `bridge` entre dos frecuencias distintas; cada paquete retransmitido emite `OK: RELAY <pulsos>`; ambos modos se detienen con `stoprx`; campo `relay` añadido al evento `status` |
 | v2.6 | Gestión completa de archivos LittleFS: `list` (nombre + tamaño + fecha ISO-8601 en bloque `[LIST-BEGIN/END]`), `show <name>` (volcado raw entre `[FILE-BEGIN/END]`), `delete <name>`, `rename <old> <new>` (ERR si dst existe), `info` (espacio total/used/free/pct + JSON `fs_info`); `save <name>` mejorado: avisa con `OK: save overwriting` antes de sobreescribir; `#include <time.h>` para formato de fecha en `list` |
+| v2.7 | Comando `autodetect <module> <freq>`: descubrimiento automático de modulación y BW — prueba 4 modulaciones (OOK → 2-FSK → 4-FSK → GFSK) × 3 anchos de banda (812 → 406 → 203 kHz) = 12 combinaciones, timeout 3 s por combo; emite `TRY: mod=X bw=Y` en cada intento, `FOUND: mod=X bw=Y rate=Z` + JSON `autodetect_found` al capturar señal, `AUTODETECT-LISTO` como marcador de finalización; actualiza globals automáticamente para que `replay`/`analyze`/`export` funcionen sin configuración adicional; corrección: `detachInterrupt(rx_pin)` incondicional para evitar interrupt colgado en módulo 2 al capturar con `relayActive=true` |
 
 El detalle de los 20 gaps resueltos y las optimizaciones de memoria están en [`GAPS.md`](GAPS.md).
 
@@ -856,4 +920,24 @@ sudo usermod -aG dialout $USER
 
 **`info` muestra `used_pct=0` aunque haya archivos**
 - Es correcto: LittleFS reserva bloques en potencias de 2; unos pocos archivos pequeños
-  apenas ocupan el 1 % del espacio total (~1.4 MB en el ESP32 con partición típica
+  apenas ocupan el 1 % del espacio total (~1.4 MB en el ESP32 con partición típica)
+
+**`autodetect` devuelve `ERR: autodetect no_signal_found`**
+- Asegúrate de pulsar/activar el dispositivo emisor durante el scan (hay hasta ~36 s en total)
+- Prueba primero con `rx 1 <freq> 812 2 47.6 4` manualmente para confirmar que hay señal
+- Verifica que la frecuencia es correcta; una diferencia de 0.1 MHz puede ser suficiente
+  para no capturar en señales de BW estrecho
+
+**`autodetect` se detiene antes de probar todas las combinaciones**
+- Comportamiento correcto: para en cuanto captura señal para no sobreescribir la muestra
+- Si quieres forzar un BW o modulación específico, usa `rx` directamente
+
+**Tras `autodetect FOUND` el `replay` no funciona**
+- Comprueba con `config` que `last_smooth_count` > 0; `replay` usa la señal suavizada,
+  no la raw — si `autodetect` capturó menos de `minsample` (30) pulsos, `signalanalyse`
+  puede no haber generado el smooth; intenta con señal más fuerte o más cerca del receptor
+
+**`autodetect` con módulo 2 no captura aunque haya señal**
+- Verifica que el módulo 2 responde con `config` (campo `cc1101_module2=present`)
+- `autodetect` usa `relayActive=true` internamente para suprimir el dual-pin check;
+  si el módulo 2 no inicializa (`getCC1101()` falla), el comando aborta con `ERR: cc1101_no_response`
