@@ -1,5 +1,6 @@
 // Evil Crow RF - Firmware con CLI Serie (sin WiFi)
 // Basado en: https://github.com/joelsernamoreno/EvilCrow-RF
+// v2.7 - autodetect
 // v2.6 - storage management completo (list/show/delete/rename/info)
 // v2.5 - relay/bridge dual-radio mode
 //
@@ -667,7 +668,7 @@ void relayTransmit(int pulseCount) {
 // ============================================================
 
 void printHelp() {
-  Serial.println(F("\n=== Evil Crow RF - Serial CLI v2.6 ==="));
+  Serial.println(F("\n=== Evil Crow RF - Serial CLI v2.7 ==="));
   Serial.println(F("  help"));
   Serial.println(F("  status"));
   Serial.println(F("  rx <module> <freq> <bw> <modulation> <deviation> <datarate>"));
@@ -728,6 +729,14 @@ void printHelp() {
   Serial.println(F("  info                            Espacio total/used/free/pct + recuento"));
   Serial.println(F("    Emite OK: info ... y JSON {\"event\":\"fs_info\",...}"));
   Serial.println(F("  save <name> ahora avisa si sobreescribe un archivo existente"));
+  Serial.println(F("--- Nuevos en v2.7 ---"));
+  Serial.println(F("  autodetect <module> <freq>      Detecta modulacion y BW automaticamente"));
+  Serial.println(F("    Prueba: mod=[OOK,2FSK,4FSK,GFSK] x bw=[812,406,203 kHz]"));
+  Serial.println(F("    Emite TRY: mod=X bw=Y por cada combinacion"));
+  Serial.println(F("    Emite FOUND: mod=X bw=Y rate=Z al capturar"));
+  Serial.println(F("    Timeout 3 s por combinacion; max 12 intentos (~36 s)"));
+  Serial.println(F("    Si encuentra senal actualiza globals (replay/analyze listos)"));
+  Serial.println(F("    Si no encuentra: ERR: autodetect no_signal_found"));
   Serial.println(F("==========================================\n"));
 }
 
@@ -1555,6 +1564,104 @@ void cmdFsInfo() {
   Serial.println(F("}"));
 }
 
+// autodetect <module> <freq>: prueba mod x bw hasta capturar senal valida
+void cmdAutodetect(const String &modToken, float freq) {
+  int moduleIdx = parseModuleIndex(modToken);
+  if (moduleIdx < 0) return;
+  if (!checkCC1101Module(moduleIdx)) return;
+
+  // Combinaciones a probar: mod primero por probabilidad (OOK mas comun)
+  const int    MODS[]     = {2, 0, 3, 1};        // OOK, 2FSK, 4FSK, GFSK
+  const float  BWS[]      = {812.0, 406.0, 203.0};
+  const int    N_MODS     = 4;
+  const int    N_BWS      = 3;
+  const int    TEST_RATE  = 4;            // kbps fijo para todas las pruebas
+  const unsigned long COMBO_TIMEOUT = 3000UL;  // ms por combinacion
+
+  int   rx_pin = (moduleIdx == 0) ? rx_pin1 : rx_pin2;
+  bool  savedRelay = relayActive;
+  relayActive = true;  // suprime dual-pin check en receiver() ISR
+
+  int   foundMod  = -1;
+  float foundBw   = 0.0;
+
+  for (int mi = 0; mi < N_MODS && foundMod < 0; mi++) {
+    for (int bi = 0; bi < N_BWS && foundMod < 0; bi++) {
+      int   m  = MODS[mi];
+      float bw = BWS[bi];
+
+      Serial.print(F("TRY: mod="));
+      Serial.print(m);
+      Serial.print(F(" bw="));
+      Serial.println((int)bw);
+
+      // Configurar CC1101
+      ELECHOUSE_cc1101.setModul(moduleIdx);
+      cc1101Init();
+      if (m == 2) { cc1101SetDcFilterOff(0); }
+      else        { cc1101SetDcFilterOff(1); cc1101SetDeviation(47.6); }
+      cc1101SetModulation(m);
+      cc1101SetMHZ(freq);
+      cc1101SetSyncMode(0);
+      cc1101SetPktFormat(3);
+      cc1101SetRxBW(bw);
+      cc1101SetDRate(TEST_RATE);
+
+      // Armar recepcion
+      samplecount = 0;
+      pinMode(rx_pin, INPUT);
+      cc1101SetRx();
+      attachInterrupt(digitalPinToInterrupt(rx_pin), receiver, CHANGE);
+
+      // Esperar hasta 3 s
+      unsigned long t0 = millis();
+      bool captured = false;
+      while (millis() - t0 < COMBO_TIMEOUT) {
+        if (checkReceived()) { captured = true; break; }
+        delay(1);
+      }
+
+      // Desconectar si checkReceived() no lo hizo ya
+      if (!captured) {
+        detachInterrupt(digitalPinToInterrupt(rx_pin));
+      }
+      ELECHOUSE_cc1101.setModul(moduleIdx);
+      cc1101SetSidle();
+
+      if (captured) {
+        foundMod = m;
+        foundBw  = bw;
+      }
+    }
+  }
+
+  relayActive = savedRelay;
+
+  if (foundMod >= 0) {
+    // Actualizar globales para que replay/analyze/export funcionen
+    modulationMode = foundMod;
+    setrxbw        = foundBw;
+    frequency      = freq;
+    datarate       = TEST_RATE;
+    tmp_module     = modToken;
+
+    Serial.print(F("FOUND: mod="));   Serial.print(foundMod);
+    Serial.print(F(" bw="));          Serial.print((int)foundBw);
+    Serial.print(F(" rate="));        Serial.println(TEST_RATE);
+
+    Serial.print(F("{\"event\":\"autodetect_found\",\"mod\":"));
+    Serial.print(foundMod);
+    Serial.print(F(",\"bw\":"));      Serial.print((int)foundBw);
+    Serial.print(F(",\"rate\":"));    Serial.print(TEST_RATE);
+    Serial.print(F(",\"freq\":"));    Serial.print(freq, 5);
+    Serial.print(F(",\"samples\":")); Serial.print(samplecount);
+    Serial.println(F("}"));
+  } else {
+    Serial.print(F("ERR: autodetect no_signal_found freq="));
+    Serial.println(freq, 5);
+  }
+}
+
 // ============================================================
 // Parser de comandos serie
 // ============================================================
@@ -1891,6 +1998,16 @@ void processSerialCommand(String cmd) {
   } else if (command == "info") {
     cmdFsInfo();
 
+  // ---- Comandos nuevos v2.7 (autodetect) ----
+
+  } else if (command == "autodetect") {
+    if (tokenCount < 3) {
+      Serial.println(F("ERR: autodetect usage: autodetect <module> <freq_MHz>"));
+      Serial.println(F("ERR: autodetect example: autodetect 1 433.92"));
+    } else {
+      cmdAutodetect(tokens[1], tokens[2].toFloat());
+    }
+
   } else {
     Serial.print(F("{\"status\":\"error\",\"cmd\":\"unknown\",\"input\":\""));
     Serial.print(command);
@@ -1941,7 +2058,7 @@ void setup() {
   ELECHOUSE_cc1101.addSpiPin(sck_pin, miso_pin, mosi_pin, cs_pin2, 1);
 
   // GAP-17: NO enableReceive() en setup — el usuario usa 'rx' para iniciar
-  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.6\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
+  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.7\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
   Serial.print(F("ECRF> "));
 }
 
