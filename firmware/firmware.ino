@@ -1,5 +1,6 @@
 // Evil Crow RF - Firmware con CLI Serie (sin WiFi)
 // Basado en: https://github.com/joelsernamoreno/EvilCrow-RF
+// v2.12 - mesh: broadcast (0xFF), seq dedup, TTL relay (chat-relay)
 // v2.11 - chat mode over CC1101 packet (GFSK 4800baud, sync 0xD391, addr filter)
 // v2.10 - profiles system (JSON LittleFS, predefined profiles)
 // v2.9 - dynamic contextual prompt
@@ -122,14 +123,52 @@ int           relayTxMod  = 0;      // modulacion TX para relay/bridge
 // v2.8: brute force mode
 volatile bool bruteActive = false;  // true mientras brute esta transmitiendo
 
-// v2.11: chat mode — estado por modulo
-#define CHAT_MAX_TEXT 58   // max bytes de texto por mensaje (limite FIFO CC1101)
+// v2.12: chat mode — paquete v2 con SEQ, TTL y broadcast
+// Formato de paquete en el aire (header 4 bytes + texto):
+//   buf[0] = DEST_ADDR  (0x00 = broadcast en hardware CC1101)
+//   buf[1] = FROM_ADDR
+//   buf[2] = SEQ        (numero de secuencia por emisor, 0-255 wrap)
+//   buf[3] = TTL        (saltos restantes, inicial CHAT_TTL_INIT, decrementado en relay)
+//   buf[4..] = texto
+#define CHAT_HDR_DEST        0
+#define CHAT_HDR_FROM        1
+#define CHAT_HDR_SEQ         2
+#define CHAT_HDR_TTL         3
+#define CHAT_HDR_SIZE        4
+#define CHAT_MAX_TEXT       55   // max texto (FIFO 64 - 1 len - 4 hdr - 2 CRC = 57, conservador)
+#define CHAT_TTL_INIT        3   // saltos maximos
+#define CHAT_BROADCAST_WIRE  0x00 // addr broadcast en CC1101 (hardware)
+#define CHAT_BROADCAST_USER  0xFF // addr broadcast visible para el usuario
+
 struct ChatState {
   bool  active;
   byte  myAddr;
   float freq;
+  byte  seqTx;         // proximo numero de secuencia de salida
+  bool  relayEnabled;  // true si chat-relay esta activo en este modulo (rx->otro)
 };
 static ChatState chatState[2];  // zero-initialized: active=false, myAddr=0, freq=0.0
+
+// Buffer circular para deteccion de duplicados (de-dup por SEQ)
+#define CHAT_SEEN_LEN 16
+struct SeenEntry { byte from; byte seq; bool valid; };
+static SeenEntry chatSeen[CHAT_SEEN_LEN];
+static uint8_t  chatSeenHead = 0;
+
+static bool chatSeenCheck(byte from, byte seq) {
+  for (int i = 0; i < CHAT_SEEN_LEN; i++) {
+    if (chatSeen[i].valid && chatSeen[i].from == from && chatSeen[i].seq == seq)
+      return true;
+  }
+  return false;
+}
+
+static void chatSeenAdd(byte from, byte seq) {
+  chatSeen[chatSeenHead].from  = from;
+  chatSeen[chatSeenHead].seq   = seq;
+  chatSeen[chatSeenHead].valid = true;
+  chatSeenHead = (chatSeenHead + 1) % CHAT_SEEN_LEN;
+}
 
 // File
 File logs;
@@ -805,9 +844,19 @@ void printHelp() {
   Serial.println(F("    addr: 1-254 (nuestra direccion en esta sesion)"));
   Serial.println(F("    Ambos modulos pueden estar activos simultaneamente"));
   Serial.println(F("  msg <module> <dest_addr> <texto>    Envia mensaje al dest_addr"));
-  Serial.println(F("    dest_addr=0 = broadcast (llega a todos)"));
+  Serial.println(F("    dest_addr=255 = broadcast (0xFF usuario -> 0x00 wire)"));
   Serial.println(F("    Mensajes recibidos aparecen: [CHAT:FROM_ADDR] texto"));
   Serial.println(F("  chat-stop <module>                  Vuelve el modulo a modo normal"));
+  Serial.println(F("--- Nuevos en v2.12 ---"));
+  Serial.println(F("  Paquete v2: [DEST][FROM][SEQ][TTL][texto] — 4 bytes cabecera"));
+  Serial.println(F("  broadcast <module> <texto>          Envia a 0xFF (todos los nodos)"));
+  Serial.println(F("    Equivale a msg con dest=255; TTL=3 para propagacion por relay"));
+  Serial.println(F("  chat-relay <rx_module>              Relay mod1->mod2 (o mod2->mod1)"));
+  Serial.println(F("    Retransmite por el otro modulo con TTL decrementado"));
+  Serial.println(F("    De-dup por (FROM,SEQ): no retransmite paquetes ya vistos"));
+  Serial.println(F("    Requiere ambos modulos en chat-start"));
+  Serial.println(F("    Emite: [RELAY: from=X seq=Y ttl=Z via=modN]"));
+  Serial.println(F("    Hasta 3 saltos (TTL_INIT=3) sin infraestructura"));
   Serial.println(F("==========================================\n"));
 }
 
@@ -1985,9 +2034,11 @@ void cmdChatStart(const String &modToken, float freq, int addr) {
   ELECHOUSE_cc1101.setMHZ(freq);
   ELECHOUSE_cc1101.SetRx();
 
-  chatState[moduleIdx].active = true;
-  chatState[moduleIdx].myAddr = (byte)addr;
-  chatState[moduleIdx].freq   = freq;
+  chatState[moduleIdx].active       = true;
+  chatState[moduleIdx].myAddr       = (byte)addr;
+  chatState[moduleIdx].freq         = freq;
+  chatState[moduleIdx].seqTx        = 0;
+  chatState[moduleIdx].relayEnabled = false;
 
   Serial.print(F("OK: chat-start module="));
   Serial.print(modToken);
@@ -2018,24 +2069,31 @@ void cmdMsg(const String &modToken, int destAddr, const String &text) {
   }
 
   byte myAddr  = chatState[moduleIdx].myAddr;
+  byte seq     = chatState[moduleIdx].seqTx++;
   int  textLen = (int)text.length();
   if (textLen > CHAT_MAX_TEXT) textLen = CHAT_MAX_TEXT;
 
-  // Paquete: [DEST_ADDR][FROM_ADDR][texto...]
-  // CC1101 usa buf[0] como byte de direccion para el filtro del receptor
+  // Paquete v2: [DEST_ADDR][FROM_ADDR][SEQ][TTL][texto...]
+  // 0xFF usuario -> 0x00 wire (broadcast CC1101)
+  byte wireDest = ((byte)destAddr == CHAT_BROADCAST_USER)
+                  ? CHAT_BROADCAST_WIRE : (byte)destAddr;
   byte buf[64];
-  buf[0] = (byte)destAddr;
-  buf[1] = myAddr;
-  for (int i = 0; i < textLen; i++) buf[2 + i] = (byte)text[i];
+  buf[CHAT_HDR_DEST] = wireDest;
+  buf[CHAT_HDR_FROM] = myAddr;
+  buf[CHAT_HDR_SEQ]  = seq;
+  buf[CHAT_HDR_TTL]  = CHAT_TTL_INIT;
+  for (int i = 0; i < textLen; i++) buf[CHAT_HDR_SIZE + i] = (byte)text[i];
 
   ELECHOUSE_cc1101.setModul(moduleIdx);
-  ELECHOUSE_cc1101.SendData(buf, (byte)(2 + textLen));
+  ELECHOUSE_cc1101.SendData(buf, (byte)(CHAT_HDR_SIZE + textLen));
   ELECHOUSE_cc1101.SetRx();  // rearmar RX tras TX
 
   Serial.print(F("OK: msg from="));
   Serial.print(myAddr);
   Serial.print(F(" to="));
   Serial.print(destAddr);
+  Serial.print(F(" seq="));
+  Serial.print(seq);
   Serial.print(F(" len="));
   Serial.print(textLen);
   Serial.print(F(" module="));
@@ -2053,11 +2111,79 @@ void cmdChatStop(const String &modToken) {
   }
   ELECHOUSE_cc1101.setModul(moduleIdx);
   ELECHOUSE_cc1101.setSidle();
-  chatState[moduleIdx].active = false;
-  chatState[moduleIdx].myAddr = 0;
-  chatState[moduleIdx].freq   = 0.0;
+  chatState[moduleIdx].active       = false;
+  chatState[moduleIdx].myAddr       = 0;
+  chatState[moduleIdx].freq         = 0.0;
+  chatState[moduleIdx].seqTx        = 0;
+  chatState[moduleIdx].relayEnabled = false;
   Serial.print(F("OK: chat-stop module="));
   Serial.println(modToken);
+}
+
+// Envia un mensaje broadcast (0xFF usuario -> 0x00 wire) con SEQ y TTL
+void cmdBroadcast(const String &modToken, const String &text) {
+  int moduleIdx = parseModuleIndex(modToken);
+  if (moduleIdx < 0) return;
+  if (!chatState[moduleIdx].active) {
+    Serial.print(F("ERR: broadcast chat_not_active module="));
+    Serial.println(modToken);
+    return;
+  }
+  if (text.length() == 0) {
+    Serial.println(F("ERR: broadcast text_empty"));
+    return;
+  }
+
+  byte myAddr  = chatState[moduleIdx].myAddr;
+  byte seq     = chatState[moduleIdx].seqTx++;
+  int  textLen = (int)text.length();
+  if (textLen > CHAT_MAX_TEXT) textLen = CHAT_MAX_TEXT;
+
+  byte buf[64];
+  buf[CHAT_HDR_DEST] = CHAT_BROADCAST_WIRE;   // 0x00 — todos los nodos lo aceptan
+  buf[CHAT_HDR_FROM] = myAddr;
+  buf[CHAT_HDR_SEQ]  = seq;
+  buf[CHAT_HDR_TTL]  = CHAT_TTL_INIT;
+  for (int i = 0; i < textLen; i++) buf[CHAT_HDR_SIZE + i] = (byte)text[i];
+
+  ELECHOUSE_cc1101.setModul(moduleIdx);
+  ELECHOUSE_cc1101.SendData(buf, (byte)(CHAT_HDR_SIZE + textLen));
+  ELECHOUSE_cc1101.SetRx();
+
+  Serial.print(F("OK: broadcast from="));
+  Serial.print(myAddr);
+  Serial.print(F(" seq="));
+  Serial.print(seq);
+  Serial.print(F(" len="));
+  Serial.print(textLen);
+  Serial.print(F(" ttl="));
+  Serial.print(CHAT_TTL_INIT);
+  Serial.print(F(" module="));
+  Serial.println(modToken);
+}
+
+// Activa relay en modulo indicado (rx=modToken, tx=otro modulo)
+void cmdChatRelay(const String &modToken) {
+  int moduleIdx = parseModuleIndex(modToken);
+  if (moduleIdx < 0) return;
+  if (!chatState[moduleIdx].active) {
+    Serial.print(F("ERR: chat-relay chat_not_active on rx module="));
+    Serial.println(modToken);
+    return;
+  }
+  int otherMod = 1 - moduleIdx;
+  if (!chatState[otherMod].active) {
+    Serial.print(F("ERR: chat-relay chat_not_active on tx module="));
+    Serial.println(otherMod + 1);
+    return;
+  }
+  chatState[moduleIdx].relayEnabled = true;
+  Serial.print(F("OK: chat-relay enabled rx=mod"));
+  Serial.print(moduleIdx + 1);
+  Serial.print(F(" tx=mod"));
+  Serial.print(otherMod + 1);
+  Serial.print(F(" ttl_init="));
+  Serial.println(CHAT_TTL_INIT);
 }
 
 // ============================================================
@@ -2469,6 +2595,29 @@ void processSerialCommand(String cmd) {
       cmdChatStop(tokens[1]);
     }
 
+  // ---- Comandos nuevos v2.12 (mesh: broadcast, chat-relay) ----
+
+  } else if (command == "broadcast") {
+    if (tokenCount < 3) {
+      Serial.println(F("ERR: broadcast usage: broadcast <module> <texto>"));
+      Serial.println(F("ERR: broadcast example: broadcast 1 hola a todos"));
+    } else {
+      String text = tokens[2];
+      for (int ti = 3; ti < tokenCount; ti++) {
+        text += ' ';
+        text += tokens[ti];
+      }
+      cmdBroadcast(tokens[1], text);
+    }
+
+  } else if (command == "chat-relay") {
+    if (tokenCount < 2) {
+      Serial.println(F("ERR: chat-relay usage: chat-relay <rx_module>"));
+      Serial.println(F("ERR: chat-relay example: chat-relay 1  (relay mod1->mod2)"));
+    } else {
+      cmdChatRelay(tokens[1]);
+    }
+
   } else {
     Serial.print(F("{\"status\":\"error\",\"cmd\":\"unknown\",\"input\":\""));
     Serial.print(command);
@@ -2528,7 +2677,7 @@ void setup() {
     writeProfileJson("fsk433",     433.920, 812.0, 0, 47.6, 4, 10, "1");
 
   // GAP-17: NO enableReceive() en setup — el usuario usa 'rx' para iniciar
-  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.11\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
+  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.12\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
   printPrompt();
 }
 
@@ -2579,29 +2728,79 @@ void loop() {
     }
   }
 
-  // v2.11: chat mode — polling de paquetes recibidos (ambos modulos)
+  // v2.12: chat mode — polling con header v2 (SEQ, TTL), dedup y relay
   for (int ci = 0; ci < 2; ci++) {
     if (!chatState[ci].active) continue;
     ELECHOUSE_cc1101.setModul(ci);
-    if (ELECHOUSE_cc1101.CheckReceiveFlag()) {
-      byte rxBuf[64];
-      byte n = ELECHOUSE_cc1101.ReceiveData(rxBuf);
-      if (n >= 2) {
-        // rxBuf[0]=DEST_ADDR  rxBuf[1]=FROM_ADDR  rxBuf[2..n-1]=texto
-        byte fromAddr = rxBuf[1];
-        int  textLen  = (int)n - 2;
-        if (textLen > 60) textLen = 60;
-        char text[64];
-        for (int tj = 0; tj < textLen; tj++) {
-          char c = (char)rxBuf[2 + tj];
-          text[tj] = (c >= 32 && c < 127) ? c : '?';
-        }
-        text[textLen] = '\0';
-        Serial.print(F("[CHAT:"));
-        Serial.print(fromAddr);
-        Serial.print(F("] "));
-        Serial.println(text);
+    if (!ELECHOUSE_cc1101.CheckReceiveFlag()) continue;
+
+    byte rxBuf[64];
+    byte n = ELECHOUSE_cc1101.ReceiveData(rxBuf);
+
+    if (n < CHAT_HDR_SIZE) {
+      // Paquete demasiado corto (v1 o ruido): rearmar y continuar
+      ELECHOUSE_cc1101.SetRx();
+      continue;
+    }
+
+    byte destAddr = rxBuf[CHAT_HDR_DEST];
+    byte fromAddr = rxBuf[CHAT_HDR_FROM];
+    byte seq      = rxBuf[CHAT_HDR_SEQ];
+    byte ttl      = rxBuf[CHAT_HDR_TTL];
+    int  textLen  = (int)n - CHAT_HDR_SIZE;
+    if (textLen > 60) textLen = 60;
+
+    // Deteccion de duplicados (de-dup por FROM + SEQ)
+    bool isDup = chatSeenCheck(fromAddr, seq);
+    if (!isDup) chatSeenAdd(fromAddr, seq);
+
+    // Imprimir si va dirigido a nosotros o es broadcast y no es duplicado
+    bool forMe = (destAddr == chatState[ci].myAddr) ||
+                 (destAddr == CHAT_BROADCAST_WIRE);
+    if (forMe && !isDup) {
+      char text[64];
+      for (int tj = 0; tj < textLen; tj++) {
+        char c = (char)rxBuf[CHAT_HDR_SIZE + tj];
+        text[tj] = (c >= 32 && c < 127) ? c : '?';
       }
+      text[textLen] = '\0';
+      Serial.print(F("[CHAT:"));
+      Serial.print(fromAddr);
+      Serial.print(F("] "));
+      Serial.println(text);
+    }
+
+    // Relay: si habilitado, TTL > 1, no duplicado, y el otro modulo esta activo
+    int otherMod = 1 - ci;
+    if (!isDup && chatState[ci].relayEnabled && ttl > 1
+        && chatState[otherMod].active) {
+      byte fwdBuf[64];
+      fwdBuf[CHAT_HDR_DEST] = destAddr;
+      fwdBuf[CHAT_HDR_FROM] = fromAddr;
+      fwdBuf[CHAT_HDR_SEQ]  = seq;
+      fwdBuf[CHAT_HDR_TTL]  = ttl - 1;
+      int fwdLen = (textLen > CHAT_MAX_TEXT) ? CHAT_MAX_TEXT : textLen;
+      for (int tj = 0; tj < fwdLen; tj++)
+        fwdBuf[CHAT_HDR_SIZE + tj] = rxBuf[CHAT_HDR_SIZE + tj];
+
+      ELECHOUSE_cc1101.setModul(otherMod);
+      ELECHOUSE_cc1101.SendData(fwdBuf, (byte)(CHAT_HDR_SIZE + fwdLen));
+      ELECHOUSE_cc1101.SetRx();   // rearmar modulo TX para recepcion
+
+      // Rearmar modulo RX original
+      ELECHOUSE_cc1101.setModul(ci);
+      ELECHOUSE_cc1101.SetRx();
+
+      Serial.print(F("[RELAY: from="));
+      Serial.print(fromAddr);
+      Serial.print(F(" seq="));
+      Serial.print(seq);
+      Serial.print(F(" ttl="));
+      Serial.print(ttl - 1);
+      Serial.print(F(" via=mod"));
+      Serial.print(otherMod + 1);
+      Serial.println(F("]"));
+    } else {
       // Rearmar RX para el proximo paquete
       ELECHOUSE_cc1101.SetRx();
     }
