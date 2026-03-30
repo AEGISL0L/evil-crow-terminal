@@ -1,5 +1,6 @@
 // Evil Crow RF - Firmware con CLI Serie (sin WiFi)
 // Basado en: https://github.com/joelsernamoreno/EvilCrow-RF
+// v2.11 - chat mode over CC1101 packet (GFSK 4800baud, sync 0xD391, addr filter)
 // v2.10 - profiles system (JSON LittleFS, predefined profiles)
 // v2.9 - dynamic contextual prompt
 // v2.8 - brute force transmitter
@@ -120,6 +121,15 @@ int           relayTxMod  = 0;      // modulacion TX para relay/bridge
 
 // v2.8: brute force mode
 volatile bool bruteActive = false;  // true mientras brute esta transmitiendo
+
+// v2.11: chat mode — estado por modulo
+#define CHAT_MAX_TEXT 58   // max bytes de texto por mensaje (limite FIFO CC1101)
+struct ChatState {
+  bool  active;
+  byte  myAddr;
+  float freq;
+};
+static ChatState chatState[2];  // zero-initialized: active=false, myAddr=0, freq=0.0
 
 // File
 File logs;
@@ -699,7 +709,7 @@ void printPrompt() {
 // ============================================================
 
 void printHelp() {
-  Serial.println(F("\n=== Evil Crow RF - Serial CLI v2.10 ==="));
+  Serial.println(F("\n=== Evil Crow RF - Serial CLI v2.11 ==="));
   Serial.println(F("  help"));
   Serial.println(F("  status"));
   Serial.println(F("  rx <module> <freq> <bw> <modulation> <deviation> <datarate>"));
@@ -789,6 +799,15 @@ void printHelp() {
   Serial.println(F("  profiles                        Lista perfiles guardados en /profiles/"));
   Serial.println(F("  profile-del <name>              Elimina perfil /profiles/<name>.json"));
   Serial.println(F("  Perfiles predefinidos: default433, default868, fsk433"));
+  Serial.println(F("--- Nuevos en v2.11 ---"));
+  Serial.println(F("  chat-start <module> <freq> <addr>   Activa modo chat en modo paquete"));
+  Serial.println(F("    GFSK 4800baud, sync=0xD391, CRC on, longitud variable, filtro addr"));
+  Serial.println(F("    addr: 1-254 (nuestra direccion en esta sesion)"));
+  Serial.println(F("    Ambos modulos pueden estar activos simultaneamente"));
+  Serial.println(F("  msg <module> <dest_addr> <texto>    Envia mensaje al dest_addr"));
+  Serial.println(F("    dest_addr=0 = broadcast (llega a todos)"));
+  Serial.println(F("    Mensajes recibidos aparecen: [CHAT:FROM_ADDR] texto"));
+  Serial.println(F("  chat-stop <module>                  Vuelve el modulo a modo normal"));
   Serial.println(F("==========================================\n"));
 }
 
@@ -1923,6 +1942,125 @@ void cmdBrute(const String &modToken, float freq, int bits, unsigned long delayM
 }
 
 // ============================================================
+// v2.11 — Chat mode sobre CC1101 en modo paquete
+// ============================================================
+
+// Configura un modulo CC1101 para modo chat (GFSK 4800 baud, paquete variable)
+void cmdChatStart(const String &modToken, float freq, int addr) {
+  int moduleIdx = parseModuleIndex(modToken);
+  if (moduleIdx < 0) return;
+  if (addr < 1 || addr > 254) {
+    Serial.println(F("ERR: chat-start addr_invalid range=1-254"));
+    return;
+  }
+  if (!checkCC1101Module(moduleIdx)) return;
+
+  // No solapar con raw_rx ISR en el mismo modulo
+  if (raw_rx == "1" && (tmp_module.toInt() - 1) == moduleIdx) {
+    Serial.println(F("ERR: chat-start raw_rx_active on this module - use stoprx first"));
+    return;
+  }
+
+  // Si ya estaba en chat, poner idle primero
+  if (chatState[moduleIdx].active) {
+    ELECHOUSE_cc1101.setModul(moduleIdx);
+    ELECHOUSE_cc1101.setSidle();
+  }
+
+  ELECHOUSE_cc1101.setModul(moduleIdx);
+  ELECHOUSE_cc1101.Init();
+  ELECHOUSE_cc1101.setModulation(1);        // GFSK
+  ELECHOUSE_cc1101.setDRate(4.8);           // 4800 baud
+  ELECHOUSE_cc1101.setDeviation(19.04);     // ~19 kHz (GFSK BT~1)
+  ELECHOUSE_cc1101.setRxBW(101.5);          // 101.5 kHz channel BW
+  ELECHOUSE_cc1101.setSyncMode(2);          // 16-bit sync
+  ELECHOUSE_cc1101.setSyncWord(0xD3, 0x91); // sync 0xD391
+  ELECHOUSE_cc1101.setPktFormat(0);         // modo paquete normal
+  ELECHOUSE_cc1101.setCrc(true);            // CRC activo
+  ELECHOUSE_cc1101.setCRC_AF(true);         // AutoFlush paquetes con CRC malo
+  ELECHOUSE_cc1101.setLengthConfig(1);      // longitud variable
+  ELECHOUSE_cc1101.setAddr((byte)addr);     // nuestra direccion
+  ELECHOUSE_cc1101.setAdrChk(2);            // filtro por addr + 0x00=broadcast
+  ELECHOUSE_cc1101.setAppendStatus(false);  // sin bytes RSSI/LQI extra
+  ELECHOUSE_cc1101.setMHZ(freq);
+  ELECHOUSE_cc1101.SetRx();
+
+  chatState[moduleIdx].active = true;
+  chatState[moduleIdx].myAddr = (byte)addr;
+  chatState[moduleIdx].freq   = freq;
+
+  Serial.print(F("OK: chat-start module="));
+  Serial.print(modToken);
+  Serial.print(F(" freq="));
+  Serial.print(freq, 5);
+  Serial.print(F(" addr="));
+  Serial.print(addr);
+  Serial.print(F(" sync=0xD391 mod=GFSK rate=4.8kbps"));
+  Serial.println();
+}
+
+// Transmite un mensaje de texto al destino indicado
+void cmdMsg(const String &modToken, int destAddr, const String &text) {
+  int moduleIdx = parseModuleIndex(modToken);
+  if (moduleIdx < 0) return;
+  if (!chatState[moduleIdx].active) {
+    Serial.print(F("ERR: msg chat_not_active module="));
+    Serial.println(modToken);
+    return;
+  }
+  if (destAddr < 0 || destAddr > 255) {
+    Serial.println(F("ERR: msg dest_addr_invalid range=0-255"));
+    return;
+  }
+  if (text.length() == 0) {
+    Serial.println(F("ERR: msg text_empty"));
+    return;
+  }
+
+  byte myAddr  = chatState[moduleIdx].myAddr;
+  int  textLen = (int)text.length();
+  if (textLen > CHAT_MAX_TEXT) textLen = CHAT_MAX_TEXT;
+
+  // Paquete: [DEST_ADDR][FROM_ADDR][texto...]
+  // CC1101 usa buf[0] como byte de direccion para el filtro del receptor
+  byte buf[64];
+  buf[0] = (byte)destAddr;
+  buf[1] = myAddr;
+  for (int i = 0; i < textLen; i++) buf[2 + i] = (byte)text[i];
+
+  ELECHOUSE_cc1101.setModul(moduleIdx);
+  ELECHOUSE_cc1101.SendData(buf, (byte)(2 + textLen));
+  ELECHOUSE_cc1101.SetRx();  // rearmar RX tras TX
+
+  Serial.print(F("OK: msg from="));
+  Serial.print(myAddr);
+  Serial.print(F(" to="));
+  Serial.print(destAddr);
+  Serial.print(F(" len="));
+  Serial.print(textLen);
+  Serial.print(F(" module="));
+  Serial.println(modToken);
+}
+
+// Desactiva el modo chat en el modulo indicado
+void cmdChatStop(const String &modToken) {
+  int moduleIdx = parseModuleIndex(modToken);
+  if (moduleIdx < 0) return;
+  if (!chatState[moduleIdx].active) {
+    Serial.print(F("ERR: chat-stop chat_not_active module="));
+    Serial.println(modToken);
+    return;
+  }
+  ELECHOUSE_cc1101.setModul(moduleIdx);
+  ELECHOUSE_cc1101.setSidle();
+  chatState[moduleIdx].active = false;
+  chatState[moduleIdx].myAddr = 0;
+  chatState[moduleIdx].freq   = 0.0;
+  Serial.print(F("OK: chat-stop module="));
+  Serial.println(modToken);
+}
+
+// ============================================================
 // Parser de comandos serie
 // ============================================================
 
@@ -2300,6 +2438,37 @@ void processSerialCommand(String cmd) {
       cmdProfileDel(tokens[1]);
     }
 
+  // ---- Comandos nuevos v2.11 (chat mode) ----
+
+  } else if (command == "chat-start") {
+    if (tokenCount < 4) {
+      Serial.println(F("ERR: chat-start usage: chat-start <module> <freq_MHz> <addr>"));
+      Serial.println(F("ERR: chat-start example: chat-start 1 433.92 42"));
+    } else {
+      cmdChatStart(tokens[1], tokens[2].toFloat(), tokens[3].toInt());
+    }
+
+  } else if (command == "msg") {
+    if (tokenCount < 4) {
+      Serial.println(F("ERR: msg usage: msg <module> <dest_addr> <texto>"));
+      Serial.println(F("ERR: msg example: msg 1 43 hola mundo"));
+    } else {
+      // Rearmar texto desde tokens[3..tokenCount-1]
+      String text = tokens[3];
+      for (int ti = 4; ti < tokenCount; ti++) {
+        text += ' ';
+        text += tokens[ti];
+      }
+      cmdMsg(tokens[1], tokens[2].toInt(), text);
+    }
+
+  } else if (command == "chat-stop") {
+    if (tokenCount < 2) {
+      Serial.println(F("ERR: chat-stop usage: chat-stop <module>"));
+    } else {
+      cmdChatStop(tokens[1]);
+    }
+
   } else {
     Serial.print(F("{\"status\":\"error\",\"cmd\":\"unknown\",\"input\":\""));
     Serial.print(command);
@@ -2359,7 +2528,7 @@ void setup() {
     writeProfileJson("fsk433",     433.920, 812.0, 0, 47.6, 4, 10, "1");
 
   // GAP-17: NO enableReceive() en setup — el usuario usa 'rx' para iniciar
-  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.10\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
+  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.11\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
   printPrompt();
 }
 
@@ -2407,6 +2576,34 @@ void loop() {
       Serial.print(F(",\"uptime_ms\":"));   Serial.print(millis());
       Serial.println(F("}"));
       lastJammerHeartbeat = millis();
+    }
+  }
+
+  // v2.11: chat mode — polling de paquetes recibidos (ambos modulos)
+  for (int ci = 0; ci < 2; ci++) {
+    if (!chatState[ci].active) continue;
+    ELECHOUSE_cc1101.setModul(ci);
+    if (ELECHOUSE_cc1101.CheckReceiveFlag()) {
+      byte rxBuf[64];
+      byte n = ELECHOUSE_cc1101.ReceiveData(rxBuf);
+      if (n >= 2) {
+        // rxBuf[0]=DEST_ADDR  rxBuf[1]=FROM_ADDR  rxBuf[2..n-1]=texto
+        byte fromAddr = rxBuf[1];
+        int  textLen  = (int)n - 2;
+        if (textLen > 60) textLen = 60;
+        char text[64];
+        for (int tj = 0; tj < textLen; tj++) {
+          char c = (char)rxBuf[2 + tj];
+          text[tj] = (c >= 32 && c < 127) ? c : '?';
+        }
+        text[textLen] = '\0';
+        Serial.print(F("[CHAT:"));
+        Serial.print(fromAddr);
+        Serial.print(F("] "));
+        Serial.println(text);
+      }
+      // Rearmar RX para el proximo paquete
+      ELECHOUSE_cc1101.SetRx();
     }
   }
 }
