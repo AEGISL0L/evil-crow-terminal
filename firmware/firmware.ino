@@ -1,5 +1,6 @@
 // Evil Crow RF - Firmware con CLI Serie (sin WiFi)
 // Basado en: https://github.com/joelsernamoreno/EvilCrow-RF
+// v2.6 - storage management completo (list/show/delete/rename/info)
 // v2.5 - relay/bridge dual-radio mode
 //
 // v2.0: todos los gaps de terminal serie resueltos (ver GAPS.md)
@@ -24,12 +25,20 @@
 // v2.5 nuevos comandos dual-radio:
 //   relay <freq> <bw> <mod>        mod1=RX, mod2=TX, misma frecuencia
 //   bridge <rx_freq> <tx_freq>     mod1=RX a rx_freq, mod2=TX a tx_freq
+// v2.6 storage management:
+//   list                           lista archivos LittleFS con nombre, tamaño y fecha
+//   show <name>                    vuelca contenido de archivo al Serial
+//   delete <name>                  elimina archivo
+//   rename <old> <new>             renombra archivo
+//   info                           espacio total/usado/libre de LittleFS
+//   save <name> ahora avisa si sobreescribe
 //
 // Prefijos de respuesta: OK: / ERR: en todos los comandos nuevos
 
 #include "ELECHOUSE_CC1101_SRC_DRV.h"
 #include <SPI.h>
 #include <LittleFS.h>
+#include <time.h>
 
 // SPI Pins — CC1101 usa HSPI en V2 (pines 14/12/13)
 // El bus VSPI (18/19/23) lo usa la SD card del V2
@@ -658,7 +667,7 @@ void relayTransmit(int pulseCount) {
 // ============================================================
 
 void printHelp() {
-  Serial.println(F("\n=== Evil Crow RF - Serial CLI v2.5 ==="));
+  Serial.println(F("\n=== Evil Crow RF - Serial CLI v2.6 ==="));
   Serial.println(F("  help"));
   Serial.println(F("  status"));
   Serial.println(F("  rx <module> <freq> <bw> <modulation> <deviation> <datarate>"));
@@ -708,6 +717,17 @@ void printHelp() {
   Serial.println(F("  bridge <rx_freq> <tx_freq>       Mod1=RX a rx_freq, Mod2=TX a tx_freq"));
   Serial.println(F("    Usa mod/bw/dev/rate actuales (ver config/load)"));
   Serial.println(F("    Ambos modos se detienen con 'stoprx'"));
+  Serial.println(F("--- Nuevos en v2.6 ---"));
+  Serial.println(F("  list                            Lista archivos en LittleFS"));
+  Serial.println(F("    Formato: <name> size=N date=ISO  encerrado en [LIST-BEGIN/END count=N]"));
+  Serial.println(F("  show <name>                     Vuelca contenido de archivo al Serial"));
+  Serial.println(F("    Encerrado en [FILE-BEGIN path=X size=N] ... [FILE-END]"));
+  Serial.println(F("  delete <name>                   Elimina archivo de LittleFS"));
+  Serial.println(F("  rename <old> <new>              Renombra archivo en LittleFS"));
+  Serial.println(F("    ERR si dst ya existe; rutas sin / se completan automaticamente"));
+  Serial.println(F("  info                            Espacio total/used/free/pct + recuento"));
+  Serial.println(F("    Emite OK: info ... y JSON {\"event\":\"fs_info\",...}"));
+  Serial.println(F("  save <name> ahora avisa si sobreescribe un archivo existente"));
   Serial.println(F("==========================================\n"));
 }
 
@@ -941,7 +961,11 @@ void cmdSave(const String &name) {
   }
 
   String path = "/cfg_" + name + ".cfg";
-  deleteFile(LittleFS, path.c_str());  // borrar si existia
+  if (LittleFS.exists(path.c_str())) {
+    Serial.print(F("OK: save overwriting existing path="));
+    Serial.println(path);
+    deleteFile(LittleFS, path.c_str());
+  }
 
   File f = LittleFS.open(path.c_str(), FILE_WRITE);
   if (!f) {
@@ -1376,6 +1400,162 @@ void cmdBridge(float rxFreq, float txFreq) {
 }
 
 // ============================================================
+// v2.6 — Storage management commands
+// ============================================================
+
+// list: todos los archivos en LittleFS con nombre, tamaño y fecha
+void cmdList() {
+  File root = LittleFS.open("/");
+  if (!root || !root.isDirectory()) {
+    Serial.println(F("ERR: list fs_open_failed"));
+    return;
+  }
+  int count = 0;
+  Serial.println(F("[LIST-BEGIN]"));
+  File entry = root.openNextFile();
+  while (entry) {
+    if (!entry.isDirectory()) {
+      time_t t = entry.getLastWrite();
+      struct tm *tmInfo = gmtime(&t);
+      char dateBuf[20];
+      strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%dT%H:%M:%S", tmInfo);
+      Serial.print(entry.name());
+      Serial.print(F(" size="));
+      Serial.print((unsigned long)entry.size());
+      Serial.print(F(" date="));
+      Serial.println(dateBuf);
+      count++;
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+  root.close();
+  Serial.print(F("[LIST-END count="));
+  Serial.print(count);
+  Serial.println(F("]"));
+  Serial.print(F("OK: list files="));
+  Serial.println(count);
+}
+
+// show <name>: vuelca el contenido raw de un archivo al Serial
+void cmdShow(const String &name) {
+  if (name.length() == 0) {
+    Serial.println(F("ERR: show missing_name"));
+    return;
+  }
+  String path = (name[0] == '/') ? name : "/" + name;
+  if (!LittleFS.exists(path.c_str())) {
+    Serial.print(F("ERR: show file_not_found path="));
+    Serial.println(path);
+    return;
+  }
+  File f = LittleFS.open(path.c_str(), "r");
+  if (!f) {
+    Serial.print(F("ERR: show fs_open_failed path="));
+    Serial.println(path);
+    return;
+  }
+  size_t sz = f.size();
+  Serial.print(F("[FILE-BEGIN path="));
+  Serial.print(path);
+  Serial.print(F(" size="));
+  Serial.print((unsigned long)sz);
+  Serial.println(F("]"));
+  while (f.available()) {
+    Serial.write(f.read());
+  }
+  f.close();
+  Serial.println(F("\n[FILE-END]"));
+  Serial.print(F("OK: show path="));
+  Serial.print(path);
+  Serial.print(F(" size="));
+  Serial.println((unsigned long)sz);
+}
+
+// delete <name>: elimina un archivo de LittleFS
+void cmdFsDelete(const String &name) {
+  if (name.length() == 0) {
+    Serial.println(F("ERR: delete missing_name"));
+    return;
+  }
+  String path = (name[0] == '/') ? name : "/" + name;
+  if (!LittleFS.exists(path.c_str())) {
+    Serial.print(F("ERR: delete file_not_found path="));
+    Serial.println(path);
+    return;
+  }
+  if (LittleFS.remove(path.c_str())) {
+    Serial.print(F("OK: deleted path="));
+    Serial.println(path);
+  } else {
+    Serial.print(F("ERR: delete failed path="));
+    Serial.println(path);
+  }
+}
+
+// rename <old> <new>: renombra un archivo en LittleFS
+void cmdFsRename(const String &oldName, const String &newName) {
+  if (oldName.length() == 0 || newName.length() == 0) {
+    Serial.println(F("ERR: rename usage: rename <old> <new>"));
+    return;
+  }
+  String oldPath = (oldName[0] == '/') ? oldName : "/" + oldName;
+  String newPath = (newName[0] == '/') ? newName : "/" + newName;
+  if (!LittleFS.exists(oldPath.c_str())) {
+    Serial.print(F("ERR: rename src_not_found path="));
+    Serial.println(oldPath);
+    return;
+  }
+  if (LittleFS.exists(newPath.c_str())) {
+    Serial.print(F("ERR: rename dst_exists path="));
+    Serial.println(newPath);
+    return;
+  }
+  if (LittleFS.rename(oldPath.c_str(), newPath.c_str())) {
+    Serial.print(F("OK: renamed "));
+    Serial.print(oldPath);
+    Serial.print(F(" -> "));
+    Serial.println(newPath);
+  } else {
+    Serial.print(F("ERR: rename failed "));
+    Serial.print(oldPath);
+    Serial.print(F(" -> "));
+    Serial.println(newPath);
+  }
+}
+
+// info: espacio total, usado y libre de LittleFS
+void cmdFsInfo() {
+  size_t total  = LittleFS.totalBytes();
+  size_t used   = LittleFS.usedBytes();
+  size_t freeBytes = total - used;
+  int usedPct   = (total > 0) ? (int)(100UL * used / total) : 0;
+  int fileCount = 0;
+  File root = LittleFS.open("/");
+  if (root && root.isDirectory()) {
+    File e = root.openNextFile();
+    while (e) {
+      if (!e.isDirectory()) fileCount++;
+      e.close();
+      e = root.openNextFile();
+    }
+    root.close();
+  }
+  Serial.print(F("OK: info total="));   Serial.print((unsigned long)total);
+  Serial.print(F(" used="));            Serial.print((unsigned long)used);
+  Serial.print(F(" free="));            Serial.print((unsigned long)freeBytes);
+  Serial.print(F(" used_pct="));        Serial.print(usedPct);
+  Serial.print(F(" files="));           Serial.println(fileCount);
+  Serial.print(F("{\"event\":\"fs_info\",\"total\":"));
+  Serial.print((unsigned long)total);
+  Serial.print(F(",\"used\":"));         Serial.print((unsigned long)used);
+  Serial.print(F(",\"free\":"));         Serial.print((unsigned long)freeBytes);
+  Serial.print(F(",\"used_pct\":"));     Serial.print(usedPct);
+  Serial.print(F(",\"files\":"));        Serial.print(fileCount);
+  Serial.println(F("}"));
+}
+
+// ============================================================
 // Parser de comandos serie
 // ============================================================
 
@@ -1682,6 +1862,35 @@ void processSerialCommand(String cmd) {
       cmdBridge(tokens[1].toFloat(), tokens[2].toFloat());
     }
 
+  // ---- Comandos nuevos v2.6 (storage management) ----
+
+  } else if (command == "list") {
+    cmdList();
+
+  } else if (command == "show") {
+    if (tokenCount < 2) {
+      Serial.println(F("ERR: show usage: show <name>"));
+    } else {
+      cmdShow(tokens[1]);
+    }
+
+  } else if (command == "delete") {
+    if (tokenCount < 2) {
+      Serial.println(F("ERR: delete usage: delete <name>"));
+    } else {
+      cmdFsDelete(tokens[1]);
+    }
+
+  } else if (command == "rename") {
+    if (tokenCount < 3) {
+      Serial.println(F("ERR: rename usage: rename <old> <new>"));
+    } else {
+      cmdFsRename(tokens[1], tokens[2]);
+    }
+
+  } else if (command == "info") {
+    cmdFsInfo();
+
   } else {
     Serial.print(F("{\"status\":\"error\",\"cmd\":\"unknown\",\"input\":\""));
     Serial.print(command);
@@ -1732,7 +1941,7 @@ void setup() {
   ELECHOUSE_cc1101.addSpiPin(sck_pin, miso_pin, mosi_pin, cs_pin2, 1);
 
   // GAP-17: NO enableReceive() en setup — el usuario usa 'rx' para iniciar
-  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.5\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
+  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.6\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
   Serial.print(F("ECRF> "));
 }
 
