@@ -6,7 +6,7 @@ desde terminal USB/serie, sin necesidad de WiFi ni panel web.
 Basado en el firmware original de
 [joelsernamoreno/EvilCrowRF-V2](https://github.com/joelsernamoreno/EvilCrowRF-V2).
 
-**Versión del firmware:** v2.8 | **Cliente Python:** ecrf-serial.py v2.1
+**Versión del firmware:** v2.9 | **Cliente Python:** ecrf-serial.py v2.1
 
 ---
 
@@ -258,7 +258,7 @@ minicom -b 115200 -D /dev/ttyUSB0
 Al conectar verás:
 
 ```
-{"event":"ready","fw":"2.8","msg":"Evil Crow RF listo","hint":"Escribe help"}
+{"event":"ready","fw":"2.9","msg":"Evil Crow RF listo","hint":"Escribe help"}
 ECRF>
 ```
 
@@ -398,6 +398,21 @@ stopbrute                           Detiene un brute en curso
   También funciona como comando normal si brute ya terminó (no-op)
 ```
 
+### Prompt dinámico (v2.9)
+
+El firmware emite un prompt contextual según el estado activo:
+
+| Estado | Prompt | Color en cliente |
+|--------|--------|-----------------|
+| Reposo | `ECRF[IDLE]> ` | Azul |
+| RX activo en módulo 1 a 433.92 MHz | `ECRF[RX:1@433.92]> ` | Verde |
+| Jammer activo en módulo 2 | `ECRF[JAM:2]> ` | Rojo |
+
+El cliente `ecrf-serial.py` parsea el prompt dinámico y lo coloriza con ANSI.
+El prompt de `input()` refleja el último estado recibido del dispositivo.
+
+---
+
 El cliente Python detecta automáticamente los bloques `[EXPORT-*-BEGIN/END]`
 y guarda el archivo en `~/evilcrow/captures/<timestamp>.<ext>`.
 
@@ -494,6 +509,12 @@ ECRF> brute 1 433.92 16 0
 
 # Detener brute mientras está ejecutándose (escribir durante la ejecución)
 ECRF> stopbrute
+
+# El prompt cambia según el estado (lo muestra el cliente coloreado)
+ECRF[IDLE]> rx 1 433.92 812 2 47.6 4     # tras rx → prompt cambia a RX
+ECRF[RX:1@433.92]> stoprx                # tras stoprx → vuelve a IDLE
+ECRF[IDLE]> jammer 1 433.92 10           # tras jammer → prompt cambia a JAM
+ECRF[JAM:1]> stopjammer                  # tras stopjammer → vuelve a IDLE
 ```
 
 ---
@@ -626,6 +647,21 @@ DBG:   STATUS[0x35]=0x0D (MARCSTATE)
 Operaciones trazadas: `Init`, `setMHZ`, `setModulation`, `setRxBW`, `setDRate`,
 `setDeviation`, `setSyncMode`, `setPktFormat`, `setDcFilterOff`, `setPA`,
 `SetRx`, `SetTx`, `setSidle`.
+
+### Prompt dinámico (`ECRF[...]> `)
+
+El firmware v2.9 emite un prompt con estado embebido en lugar del `ECRF> ` estático.
+El cliente lo parsea con `PROMPT_RE = re.compile(r'^ECRF\[([^\]]+)\]> ?$')` y
+coloriza según el estado extraído:
+
+```
+ECRF[IDLE]>           ← azul   (sin actividad)
+ECRF[RX:1@433.92]>   ← verde  (módulo 1 escuchando a 433.92 MHz)
+ECRF[JAM:2]>          ← rojo   (módulo 2 en modo jammer)
+```
+
+Retrocompatibilidad: si el dispositivo emite el prompt legacy `ECRF> ` (firmware
+< v2.9), el cliente lo detecta igualmente y lo muestra sin colorizar.
 
 ### Brute force (`brute`, `stopbrute`)
 
@@ -876,9 +912,9 @@ evilcrow/
 │   ├── firmware.ino.bin             Binario listo para flashear
 │   ├── firmware.ino.bootloader.bin
 │   └── firmware.ino.partitions.bin
-├── EvilCrow-RF/                     Firmware v2.8 (modificado)
+├── EvilCrow-RF/                     Firmware v2.9 (modificado)
 │   └── firmware/
-│       ├── firmware.ino             ← Sketch principal v2.8
+│       ├── firmware.ino             ← Sketch principal v2.9
 │       ├── ELECHOUSE_CC1101_SRC_DRV.h
 │       └── ELECHOUSE_CC1101_SRC_DRV.cpp
 └── EvilCrowRF-V2/                   Repo V2 original (referencia)
@@ -903,6 +939,7 @@ evilcrow/
 | v2.6 | Gestión completa de archivos LittleFS: `list` (nombre + tamaño + fecha ISO-8601 en bloque `[LIST-BEGIN/END]`), `show <name>` (volcado raw entre `[FILE-BEGIN/END]`), `delete <name>`, `rename <old> <new>` (ERR si dst existe), `info` (espacio total/used/free/pct + JSON `fs_info`); `save <name>` mejorado: avisa con `OK: save overwriting` antes de sobreescribir; `#include <time.h>` para formato de fecha en `list` |
 | v2.7 | Comando `autodetect <module> <freq>`: descubrimiento automático de modulación y BW — prueba 4 modulaciones (OOK → 2-FSK → 4-FSK → GFSK) × 3 anchos de banda (812 → 406 → 203 kHz) = 12 combinaciones, timeout 3 s por combo; emite `TRY: mod=X bw=Y` en cada intento, `FOUND: mod=X bw=Y rate=Z` + JSON `autodetect_found` al capturar señal, `AUTODETECT-LISTO` como marcador de finalización; actualiza globals automáticamente para que `replay`/`analyze`/`export` funcionen sin configuración adicional; corrección: `detachInterrupt(rx_pin)` incondicional para evitar interrupt colgado en módulo 2 al capturar con `relayActive=true` |
 | v2.8 | Comandos `brute <module> <freq> <bits> <delay_ms>` y `stopbrute`: transmisor de fuerza bruta — genera y transmite secuencialmente todos los 2^bits códigos posibles (máx. 24 bits = 16 777 216 códigos) con encoding OOK MSB primero (bit1=600µs/200µs, bit0=200µs/600µs); progreso cada 1000 códigos con `BRUTE: n/total ultimo=0xHHH`; `stopbrute` detectable durante el loop vía polling Serial en cada pausa inter-código; `yield()` por iteración para compatibilidad con WDT de FreeRTOS; `ERR:` si bits > 24; emite `BRUTE-LISTO` al finalizar (completo o detenido) |
+| v2.9 | Prompt contextual dinámico: `printPrompt()` reemplaza el `ECRF> ` estático con `ECRF[IDLE]> `, `ECRF[RX:<mod>@<freq>]> ` o `ECRF[JAM:<mod>]> ` según `raw_rx`/`jammer_tx`/`tmp_module`/`frequency`; 17 puntos de impresión actualizados; en `ecrf-serial.py`: `PROMPT_RE` + `_color_prompt()` parsean y colorean el prompt (azul=IDLE, verde=RX, rojo=JAM), `_device_state` actualizado atómicamente por el hilo lector, `_live_prompt()` para `input()` en modo interactivo; retrocompatibilidad con firmware < v2.9 mediante `PROMPT_LEGACY` |
 
 El detalle de los 20 gaps resueltos y las optimizaciones de memoria están en [`GAPS.md`](GAPS.md).
 
@@ -1038,3 +1075,21 @@ sudo usermod -aG dialout $USER
 **`ERR: brute bits_out_of_range` con bits=24**
 - bits=24 es válido (2^24 = 16 777 216 códigos); el error solo salta con bits > 24 o bits < 1
 - Comprueba que no hay espacios extra en el comando: `brute 1 433.92 24 0`
+
+**El prompt del cliente siempre muestra `ECRF[IDLE]>` aunque RX esté activo**
+- El cliente actualiza el estado al recibir el prompt del firmware; si el terminal
+  muestra el prompt de `input()` ANTES de que el firmware envíe el suyo, el estado
+  se verá en la SIGUIENTE llamada a `input()` (lag de un comando)
+- Si el estado nunca cambia, verifica que el firmware es v2.9+ con `status` →
+  `"fw":"2.9"` en la respuesta; firmware anterior emite `ECRF> ` sin estado
+
+**El prompt aparece con texto roto o sin color**
+- El terminal no soporta secuencias ANSI; prueba `TERM=xterm-256color python3 ecrf-serial.py`
+- En Windows PowerShell ejecuta `[Console]::OutputEncoding = [Text.Encoding]::UTF8`
+  y activa ANSI con `Set-ItemProperty HKCU:\Console VirtualTerminalLevel 1`
+
+**El prompt muestra `ECRF[RX:1@433.92]>` pero hay `stoprx` activo**
+- El firmware actualiza `raw_rx = "0"` dentro de `processSerialCommand()`, y el prompt
+  se emite al FINAL del mismo; si el comando `stoprx` actualiza el estado correctamente
+  el prompt que sigue a `stoprx` debe mostrar `ECRF[IDLE]>`; si no es así, verifica
+  que no hay otro comando activo rearmando el receptor (relay/bridge)

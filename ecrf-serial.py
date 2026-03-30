@@ -41,10 +41,41 @@ try:
 except ImportError:
     HAS_READLINE = False
 
+import re
+
 BAUD_DEFAULT      = 115200
 DELAY_DEFAULT_MS  = 500.0
 TIMEOUT_DEFAULT_S = 5.0
-PROMPT            = "ECRF> "
+
+# ---- Prompt dinamico (v2.9) ----
+# El firmware emite ECRF[IDLE]> / ECRF[RX:1@433.92]> / ECRF[JAM:2]>
+# El cliente v<2.9 emitia ECRF> (mantenido para retrocompatibilidad)
+PROMPT_LEGACY  = "ECRF> "
+PROMPT_PREFIX  = "ECRF["    # prefijo comun de todos los prompts dinamicos
+PROMPT_RE      = re.compile(r'^ECRF\[([^\]]+)\]> ?$')
+
+# ANSI colors
+_ANSI_RESET = "\033[0m"
+_ANSI_BLUE  = "\033[94m"   # IDLE
+_ANSI_GREEN = "\033[92m"   # RX activo
+_ANSI_RED   = "\033[91m"   # JAM activo
+
+# Estado actual — actualizado por el hilo lector, leido por el hilo principal
+_device_state = "IDLE"   # str assignment es atomica en CPython (GIL)
+
+def _color_prompt(state: str) -> str:
+    """Devuelve el string de prompt ANSI-coloreado segun estado."""
+    if state.startswith("RX:"):
+        color = _ANSI_GREEN
+    elif state.startswith("JAM:"):
+        color = _ANSI_RED
+    else:
+        color = _ANSI_BLUE
+    return f"{color}ECRF[{state}]> {_ANSI_RESET}"
+
+def _live_prompt() -> str:
+    """Prompt coloreado con el ultimo estado conocido del dispositivo."""
+    return _color_prompt(_device_state)
 
 # Directorio donde se guardan las capturas exportadas
 CAPTURES_DIR = os.path.expanduser("~/evilcrow/captures")
@@ -180,6 +211,21 @@ def _reader_thread(ser):
                 export_buf.append(text)
                 continue
 
+            # Prompt dinamico: colorizar y actualizar estado
+            m = PROMPT_RE.match(text)
+            if m:
+                global _device_state
+                _device_state = m.group(1)
+                sys.stdout.write(f"\r\033[K{_color_prompt(_device_state)}\n")
+                sys.stdout.flush()
+                continue
+
+            # Prompt legacy (firmware < v2.9): imprimir sin color
+            if text == PROMPT_LEGACY.rstrip():
+                sys.stdout.write(f"\r\033[K{text}\n")
+                sys.stdout.flush()
+                continue
+
             # Linea normal: imprimir
             sys.stdout.write(f"\r\033[K{text}\n")
             sys.stdout.flush()
@@ -206,7 +252,7 @@ def run_interactive(ser):
     try:
         while True:
             try:
-                cmd = input(PROMPT).strip()
+                cmd = input(_live_prompt()).strip()
             except EOFError:
                 break
             if not cmd:
@@ -248,10 +294,14 @@ def wait_for_response(ser, timeout_s=TIMEOUT_DEFAULT_S):
                 buf  = buf[nl + 1:]
                 if line:
                     lines.append(line)
-            # Detectar prompt sin newline al final
-            if PROMPT in buf:
-                pi     = buf.rfind(PROMPT)
-                before = buf[:pi].strip("\r\n")
+            # Detectar prompt sin newline al final (legacy o dinamico)
+            prompt_pos = -1
+            for pfx in (PROMPT_PREFIX, PROMPT_LEGACY):
+                idx = buf.rfind(pfx)
+                if idx != -1 and idx > prompt_pos:
+                    prompt_pos = idx
+            if prompt_pos != -1:
+                before = buf[:prompt_pos].strip("\r\n")
                 if before:
                     lines.append(before)
                 break
@@ -263,7 +313,7 @@ def wait_for_response(ser, timeout_s=TIMEOUT_DEFAULT_S):
     if remainder:
         for piece in remainder.split("\n"):
             piece = piece.rstrip("\r").strip()
-            if piece and PROMPT not in piece:
+            if piece and PROMPT_PREFIX not in piece and PROMPT_LEGACY not in piece:
                 lines.append(piece)
 
     return lines
@@ -287,7 +337,7 @@ def wait_passive(ser, seconds, log_fh, start_time):
                 nl   = buf.index("\n")
                 line = buf[:nl].rstrip("\r")
                 buf  = buf[nl + 1:]
-                if line and PROMPT not in line:
+                if line and PROMPT_PREFIX not in line and PROMPT_LEGACY not in line:
                     _log(log_fh, start_time, "ASYNC", line)
         else:
             time.sleep(0.05)

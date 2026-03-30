@@ -1,5 +1,7 @@
 // Evil Crow RF - Firmware con CLI Serie (sin WiFi)
 // Basado en: https://github.com/joelsernamoreno/EvilCrow-RF
+// v2.10 - profiles system (JSON LittleFS, predefined profiles)
+// v2.9 - dynamic contextual prompt
 // v2.8 - brute force transmitter
 // v2.7 - autodetect
 // v2.6 - storage management completo (list/show/delete/rename/info)
@@ -668,11 +670,36 @@ void relayTransmit(int pulseCount) {
 }
 
 // ============================================================
+// Serial CLI — prompt dinamico (v2.9)
+// ============================================================
+
+// Emite el prompt contextual segun estado activo:
+//   ECRF[IDLE]>          en reposo
+//   ECRF[RX:<mod>@<freq>]>   receptor activo
+//   ECRF[JAM:<mod>]>         jammer activo
+void printPrompt() {
+  Serial.println();
+  Serial.print(F("ECRF["));
+  if (jammer_tx == "1") {
+    Serial.print(F("JAM:"));
+    Serial.print(tmp_module);
+  } else if (raw_rx == "1") {
+    Serial.print(F("RX:"));
+    Serial.print(tmp_module);
+    Serial.print('@');
+    Serial.print(frequency, 2);
+  } else {
+    Serial.print(F("IDLE"));
+  }
+  Serial.print(F("]> "));
+}
+
+// ============================================================
 // Serial CLI — ayuda
 // ============================================================
 
 void printHelp() {
-  Serial.println(F("\n=== Evil Crow RF - Serial CLI v2.8 ==="));
+  Serial.println(F("\n=== Evil Crow RF - Serial CLI v2.10 ==="));
   Serial.println(F("  help"));
   Serial.println(F("  status"));
   Serial.println(F("  rx <module> <freq> <bw> <modulation> <deviation> <datarate>"));
@@ -751,6 +778,17 @@ void printHelp() {
   Serial.println(F("    Emite BRUTE-LISTO al finalizar (completo o detenido)"));
   Serial.println(F("    ERR: si bits>24 para evitar ejecuciones infinitas"));
   Serial.println(F("  stopbrute                         Detiene brute en curso"));
+  Serial.println(F("--- Cambios en v2.9 ---"));
+  Serial.println(F("  Prompt dinamico segun estado:"));
+  Serial.println(F("    ECRF[IDLE]>          en reposo"));
+  Serial.println(F("    ECRF[RX:1@433.92]>   modulo 1 recibiendo a 433.92 MHz"));
+  Serial.println(F("    ECRF[JAM:2]>         modulo 2 con jammer activo"));
+  Serial.println(F("--- Nuevos en v2.10 ---"));
+  Serial.println(F("  save <name>                     Guarda config como /profiles/<name>.json"));
+  Serial.println(F("  load <name>                     Carga perfil JSON; fallback a /cfg_<name>.cfg"));
+  Serial.println(F("  profiles                        Lista perfiles guardados en /profiles/"));
+  Serial.println(F("  profile-del <name>              Elimina perfil /profiles/<name>.json"));
+  Serial.println(F("  Perfiles predefinidos: default433, default868, fsk433"));
   Serial.println(F("==========================================\n"));
 }
 
@@ -968,13 +1006,38 @@ void cmdReplay(const String &modToken) {
   Serial.println(lastSmoothModule);
 }
 
-// save <name>: guarda config activa en /cfg_<name>.cfg
+// ---- v2.10: JSON profile helpers ----
+
+// writeProfileJson: escribe /profiles/<name>.json con los parametros dados
+static bool writeProfileJson(const String &name, float freq_, float bw_,
+                              int mod_, float dev_, int rate_, int power_,
+                              const String &module_) {
+  LittleFS.mkdir("/profiles");  // no-op si ya existe
+  String path = "/profiles/" + name + ".json";
+  if (LittleFS.exists(path.c_str())) {
+    LittleFS.remove(path.c_str());
+  }
+  File f = LittleFS.open(path.c_str(), FILE_WRITE);
+  if (!f) return false;
+  f.println(F("{"));
+  f.print(F("\"freq\": "));   f.print(freq_, 6);  f.println(F(","));
+  f.print(F("\"bw\": "));     f.print(bw_, 3);    f.println(F(","));
+  f.print(F("\"mod\": "));    f.print(mod_);       f.println(F(","));
+  f.print(F("\"dev\": "));    f.print(dev_, 3);    f.println(F(","));
+  f.print(F("\"rate\": "));   f.print(rate_);      f.println(F(","));
+  f.print(F("\"power\": "));  f.print(power_);     f.println(F(","));
+  f.print(F("\"module\": \"")); f.print(module_); f.println(F("\""));
+  f.println(F("}"));
+  f.close();
+  return true;
+}
+
+// save <name>: guarda config activa en /profiles/<name>.json
 void cmdSave(const String &name) {
   if (name.length() == 0 || name.length() > 20) {
     Serial.println(F("ERR: save name_invalid max_20_chars"));
     return;
   }
-  // Validar que name sea alfanumerico
   for (unsigned int i = 0; i < name.length(); i++) {
     char c = name[i];
     if (!isAlphaNumeric(c) && c != '_' && c != '-') {
@@ -983,27 +1046,18 @@ void cmdSave(const String &name) {
     }
   }
 
-  String path = "/cfg_" + name + ".cfg";
+  String path = "/profiles/" + name + ".json";
   if (LittleFS.exists(path.c_str())) {
     Serial.print(F("OK: save overwriting existing path="));
     Serial.println(path);
-    deleteFile(LittleFS, path.c_str());
   }
 
-  File f = LittleFS.open(path.c_str(), FILE_WRITE);
-  if (!f) {
+  if (!writeProfileJson(name, frequency, setrxbw, modulationMode,
+                        deviation, datarate, power_jammer, tmp_module)) {
     Serial.print(F("ERR: save fs_open_failed path="));
     Serial.println(path);
     return;
   }
-  f.print(F("freq="));       f.println(frequency, 6);
-  f.print(F("bw="));         f.println(setrxbw, 3);
-  f.print(F("mod="));        f.println(modulationMode);
-  f.print(F("dev="));        f.println(deviation, 3);
-  f.print(F("rate="));       f.println(datarate);
-  f.print(F("power="));      f.println(power_jammer);
-  f.print(F("module="));     f.println(tmp_module);
-  f.close();
 
   Serial.print(F("OK: saved path="));
   Serial.print(path);
@@ -1015,18 +1069,22 @@ void cmdSave(const String &name) {
   Serial.print(F(" power="));  Serial.println(power_jammer);
 }
 
-// load <name>: carga config desde /cfg_<name>.cfg y aplica variables globales
+// load <name>: carga /profiles/<name>.json; fallback a /cfg_<name>.cfg (formato antiguo)
 void cmdLoad(const String &name) {
   if (name.length() == 0 || name.length() > 20) {
     Serial.println(F("ERR: load name_invalid"));
     return;
   }
 
-  String path = "/cfg_" + name + ".cfg";
-  if (!LittleFS.exists(path.c_str())) {
-    Serial.print(F("ERR: load file_not_found path="));
-    Serial.println(path);
-    return;
+  String path = "/profiles/" + name + ".json";
+  bool isJson = LittleFS.exists(path.c_str());
+  if (!isJson) {
+    path = "/cfg_" + name + ".cfg";
+    if (!LittleFS.exists(path.c_str())) {
+      Serial.print(F("ERR: load file_not_found name="));
+      Serial.println(name);
+      return;
+    }
   }
 
   File f = LittleFS.open(path.c_str(), "r");
@@ -1036,23 +1094,46 @@ void cmdLoad(const String &name) {
     return;
   }
 
-  // Leer lineas clave=valor
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
-    int eq = line.indexOf('=');
-    if (eq < 0) continue;
-    String key = line.substring(0, eq);
-    String val = line.substring(eq + 1);
-    key.trim(); val.trim();
-
-    if      (key == "freq")   frequency      = val.toFloat();
-    else if (key == "bw")     setrxbw        = val.toFloat();
-    else if (key == "mod")    modulationMode = val.toInt();
-    else if (key == "dev")    deviation      = val.toFloat();
-    else if (key == "rate")   datarate       = val.toInt();
-    else if (key == "power")  power_jammer   = val.toInt();
-    else if (key == "module") tmp_module     = val;
+    if (isJson) {
+      // Parsear "key": value[,]
+      int q1 = line.indexOf('"');
+      if (q1 < 0) continue;
+      int q2 = line.indexOf('"', q1 + 1);
+      if (q2 < 0) continue;
+      String key = line.substring(q1 + 1, q2);
+      int colon = line.indexOf(':', q2 + 1);
+      if (colon < 0) continue;
+      String val = line.substring(colon + 1);
+      val.trim();
+      if (val.endsWith(",")) val.remove(val.length() - 1);
+      val.trim();
+      if (val.startsWith("\"") && val.endsWith("\""))
+        val = val.substring(1, val.length() - 1);
+      if      (key == "freq")   frequency      = val.toFloat();
+      else if (key == "bw")     setrxbw        = val.toFloat();
+      else if (key == "mod")    modulationMode = val.toInt();
+      else if (key == "dev")    deviation      = val.toFloat();
+      else if (key == "rate")   datarate       = val.toInt();
+      else if (key == "power")  power_jammer   = val.toInt();
+      else if (key == "module") tmp_module     = val;
+    } else {
+      // Formato antiguo key=value
+      int eq = line.indexOf('=');
+      if (eq < 0) continue;
+      String key = line.substring(0, eq);
+      String val = line.substring(eq + 1);
+      key.trim(); val.trim();
+      if      (key == "freq")   frequency      = val.toFloat();
+      else if (key == "bw")     setrxbw        = val.toFloat();
+      else if (key == "mod")    modulationMode = val.toInt();
+      else if (key == "dev")    deviation      = val.toFloat();
+      else if (key == "rate")   datarate       = val.toInt();
+      else if (key == "power")  power_jammer   = val.toInt();
+      else if (key == "module") tmp_module     = val;
+    }
   }
   f.close();
 
@@ -1065,6 +1146,60 @@ void cmdLoad(const String &name) {
   Serial.print(F(" rate="));   Serial.print(datarate);
   Serial.print(F(" power="));  Serial.print(power_jammer);
   Serial.print(F(" module="));  Serial.println(tmp_module);
+}
+
+// profiles: lista perfiles en /profiles/
+void cmdProfiles() {
+  LittleFS.mkdir("/profiles");  // crea si no existe
+  File dir = LittleFS.open("/profiles");
+  if (!dir || !dir.isDirectory()) {
+    Serial.println(F("OK: profiles none"));
+    return;
+  }
+  int count = 0;
+  Serial.println(F("OK: profiles:"));
+  File entry = dir.openNextFile();
+  while (entry) {
+    if (!entry.isDirectory()) {
+      String fname = String(entry.name());
+      int lastSlash = fname.lastIndexOf('/');
+      if (lastSlash >= 0) fname = fname.substring(lastSlash + 1);
+      if (fname.endsWith(".json")) fname.remove(fname.length() - 5);
+      Serial.print(F("  "));
+      Serial.print(fname);
+      Serial.print(F("  ("));
+      Serial.print(entry.size());
+      Serial.println(F(" bytes)"));
+      count++;
+    }
+    entry.close();
+    entry = dir.openNextFile();
+  }
+  dir.close();
+  if (count == 0) Serial.println(F("  (ninguno)"));
+  Serial.print(F("OK: profiles total="));
+  Serial.println(count);
+}
+
+// profile-del <name>: elimina /profiles/<name>.json
+void cmdProfileDel(const String &name) {
+  if (name.length() == 0 || name.length() > 20) {
+    Serial.println(F("ERR: profile-del name_invalid"));
+    return;
+  }
+  String path = "/profiles/" + name + ".json";
+  if (!LittleFS.exists(path.c_str())) {
+    Serial.print(F("ERR: profile-del not_found path="));
+    Serial.println(path);
+    return;
+  }
+  if (LittleFS.remove(path.c_str())) {
+    Serial.print(F("OK: profile-del deleted path="));
+    Serial.println(path);
+  } else {
+    Serial.print(F("ERR: profile-del failed path="));
+    Serial.println(path);
+  }
 }
 
 // ============================================================
@@ -1794,7 +1929,7 @@ void cmdBrute(const String &modToken, float freq, int bits, unsigned long delayM
 void processSerialCommand(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) {
-    Serial.print(F("ECRF> "));
+    printPrompt();
     return;
   }
 
@@ -1836,10 +1971,10 @@ void processSerialCommand(String cmd) {
   } else if (command == "rx") {
     if (tokenCount < 7) {
       Serial.println(F("{\"status\":\"error\",\"cmd\":\"rx\",\"msg\":\"Uso: rx <module> <freq> <bw> <modulation> <deviation> <datarate>\"}"));
-      Serial.print(F("ECRF> ")); return;
+      printPrompt(); return;
     }
     int moduleIdx = parseModuleIndex(tokens[1]);
-    if (moduleIdx < 0) { Serial.print(F("ECRF> ")); return; }
+    if (moduleIdx < 0) { printPrompt(); return; }
 
     float rxFreq = tokens[2].toFloat();
     float rxBw   = tokens[3].toFloat();
@@ -1849,9 +1984,9 @@ void processSerialCommand(String cmd) {
 
     if (rxMod < 0 || rxMod > 4) {
       Serial.println(F("{\"status\":\"error\",\"cmd\":\"rx\",\"msg\":\"modulation fuera de rango: 0-4\"}"));
-      Serial.print(F("ECRF> ")); return;
+      printPrompt(); return;
     }
-    if (!checkCC1101Module(moduleIdx)) { Serial.print(F("ECRF> ")); return; }
+    if (!checkCC1101Module(moduleIdx)) { printPrompt(); return; }
 
     frequency = rxFreq; setrxbw = rxBw;
     modulationMode = rxMod; deviation = rxDev; datarate = rxRate;
@@ -1881,10 +2016,10 @@ void processSerialCommand(String cmd) {
   } else if (command == "tx") {
     if (tokenCount < 6) {
       Serial.println(F("{\"status\":\"error\",\"cmd\":\"tx\",\"msg\":\"Uso: tx <module> <freq> <modulation> <deviation> <rawdata>\"}"));
-      Serial.print(F("ECRF> ")); return;
+      printPrompt(); return;
     }
     int modIdx = parseModuleIndex(tokens[1]);
-    if (modIdx < 0) { Serial.print(F("ECRF> ")); return; }
+    if (modIdx < 0) { printPrompt(); return; }
 
     float txFreq = tokens[2].toFloat();
     int   txMod  = tokens[3].toInt();
@@ -1892,14 +2027,14 @@ void processSerialCommand(String cmd) {
 
     if (txMod < 0 || txMod > 4) {
       Serial.println(F("{\"status\":\"error\",\"cmd\":\"tx\",\"msg\":\"modulation fuera de rango: 0-4\"}"));
-      Serial.print(F("ECRF> ")); return;
+      printPrompt(); return;
     }
 
     String rawdata = "";
     for (int i = 5; i < tokenCount; i++) rawdata += tokens[i];
     if (rawdata.length() == 0) {
       Serial.println(F("{\"status\":\"error\",\"cmd\":\"tx\",\"msg\":\"rawdata vacio\"}"));
-      Serial.print(F("ECRF> ")); return;
+      printPrompt(); return;
     }
 
     int counter = 0, pos = 0;
@@ -1913,9 +2048,9 @@ void processSerialCommand(String cmd) {
     }
     if (bufOverflow) {
       Serial.println(F("{\"status\":\"error\",\"cmd\":\"tx\",\"msg\":\"rawdata supera limite de 2000\"}"));
-      Serial.print(F("ECRF> ")); return;
+      printPrompt(); return;
     }
-    if (!checkCC1101Module(modIdx)) { Serial.print(F("ECRF> ")); return; }
+    if (!checkCC1101Module(modIdx)) { printPrompt(); return; }
 
     tmp_module = tokens[1]; frequency = txFreq; modulationMode = txMod; deviation = txDev;
     int tx_pin = (modIdx == 0) ? tx_pin1 : tx_pin2;
@@ -1942,14 +2077,14 @@ void processSerialCommand(String cmd) {
   } else if (command == "jammer") {
     if (tokenCount < 4) {
       Serial.println(F("{\"status\":\"error\",\"cmd\":\"jammer\",\"msg\":\"Uso: jammer <module> <freq> <power>\"}"));
-      Serial.print(F("ECRF> ")); return;
+      printPrompt(); return;
     }
     int modIdx = parseModuleIndex(tokens[1]);
-    if (modIdx < 0) { Serial.print(F("ECRF> ")); return; }
+    if (modIdx < 0) { printPrompt(); return; }
 
     float jamFreq  = tokens[2].toFloat();
     int   jamPower = tokens[3].toInt();
-    if (!checkCC1101Module(modIdx)) { Serial.print(F("ECRF> ")); return; }
+    if (!checkCC1101Module(modIdx)) { printPrompt(); return; }
 
     tmp_module = tokens[1]; frequency = jamFreq; power_jammer = jamPower;
     int tx_pin = (modIdx == 0) ? tx_pin1 : tx_pin2;
@@ -2153,13 +2288,25 @@ void processSerialCommand(String cmd) {
     bruteActive = false;
     Serial.println(F("OK: stopbrute signal_sent"));
 
+  // ---- Comandos nuevos v2.10 (profiles system) ----
+
+  } else if (command == "profiles") {
+    cmdProfiles();
+
+  } else if (command == "profile-del") {
+    if (tokenCount < 2) {
+      Serial.println(F("ERR: profile-del usage: profile-del <name>"));
+    } else {
+      cmdProfileDel(tokens[1]);
+    }
+
   } else {
     Serial.print(F("{\"status\":\"error\",\"cmd\":\"unknown\",\"input\":\""));
     Serial.print(command);
     Serial.println(F("\",\"msg\":\"Comando no reconocido. Escribe help.\"}"));
   }
 
-  Serial.print(F("\nECRF> "));
+  printPrompt();
 }
 
 // GAP-18: eco de caracteres y manejo de backspace
@@ -2202,9 +2349,18 @@ void setup() {
   ELECHOUSE_cc1101.addSpiPin(sck_pin, miso_pin, mosi_pin, cs_pin1, 0);
   ELECHOUSE_cc1101.addSpiPin(sck_pin, miso_pin, mosi_pin, cs_pin2, 1);
 
+  // v2.10: crear perfiles predefinidos si no existen
+  LittleFS.mkdir("/profiles");
+  if (!LittleFS.exists("/profiles/default433.json"))
+    writeProfileJson("default433", 433.920, 812.0, 2, 47.6, 4, 10, "1");
+  if (!LittleFS.exists("/profiles/default868.json"))
+    writeProfileJson("default868", 868.350, 812.0, 2, 47.6, 4, 10, "1");
+  if (!LittleFS.exists("/profiles/fsk433.json"))
+    writeProfileJson("fsk433",     433.920, 812.0, 0, 47.6, 4, 10, "1");
+
   // GAP-17: NO enableReceive() en setup — el usuario usa 'rx' para iniciar
-  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.8\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
-  Serial.print(F("ECRF> "));
+  Serial.println(F("{\"event\":\"ready\",\"fw\":\"2.10\",\"msg\":\"Evil Crow RF listo\",\"hint\":\"Escribe help\"}"));
+  printPrompt();
 }
 
 void loop() {
@@ -2225,7 +2381,7 @@ void loop() {
         printReceived();
         signalanalyse();
         enableReceive();
-        Serial.print(F("\nECRF> "));
+        printPrompt();
         delay(700);
       }
       rxStartTime = millis();
