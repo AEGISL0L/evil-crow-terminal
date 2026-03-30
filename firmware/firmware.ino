@@ -1621,10 +1621,11 @@ void cmdAutodetect(const String &modToken, float freq) {
         delay(1);
       }
 
-      // Desconectar si checkReceived() no lo hizo ya
-      if (!captured) {
-        detachInterrupt(digitalPinToInterrupt(rx_pin));
-      }
+      // Garantizar que el interrupt quede desconectado siempre:
+      // checkReceived() con relayActive=true solo detach rx_pin1;
+      // si usamos rx_pin2 (moduleIdx=1, captured=true) necesitamos
+      // desconectarlo explicitamente aqui tambien.
+      detachInterrupt(digitalPinToInterrupt(rx_pin));
       ELECHOUSE_cc1101.setModul(moduleIdx);
       cc1101SetSidle();
 
@@ -1656,6 +1657,7 @@ void cmdAutodetect(const String &modToken, float freq) {
     Serial.print(F(",\"freq\":"));    Serial.print(freq, 5);
     Serial.print(F(",\"samples\":")); Serial.print(samplecount);
     Serial.println(F("}"));
+    Serial.println(F("AUTODETECT-LISTO"));
   } else {
     Serial.print(F("ERR: autodetect no_signal_found freq="));
     Serial.println(freq, 5);
