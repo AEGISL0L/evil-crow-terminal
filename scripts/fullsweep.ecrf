@@ -1,0 +1,38 @@
+# fullsweep.ecrf — Barrido completo CC1101 (300-928 MHz, paso 0.1 MHz)
+# 6 bloques para respetar limite de 500 steps por scan
+
+# timeout 20
+# delay 200
+
+# === Banda baja: 300-348 MHz (480 steps) ===
+scan 1 300.0 348.0 0.1
+# wait 3
+stoprx
+# wait 1
+
+# === Banda media parte 1: 387-437 MHz (500 steps) ===
+scan 1 387.0 437.0 0.1
+# wait 3
+stoprx
+# wait 1
+
+# === Banda media parte 2: 437-464 MHz (270 steps) ===
+scan 1 437.0 464.0 0.1
+# wait 3
+stoprx
+# wait 1
+
+# === Banda alta parte 1: 779-829 MHz (500 steps) ===
+scan 1 779.0 829.0 0.1
+# wait 3
+stoprx
+# wait 1
+
+# === Banda alta parte 2: 829-879 MHz (500 steps) ===
+scan 1 829.0 879.0 0.1
+# wait 3
+stoprx
+# wait 1
+
+# === Banda alta parte 3: 879-928 MHz (490 steps) ===
+scan 1 879.0 928.0 0.1

@@ -1,0 +1,41 @@
+# investigate-449.ecrf — Investigar pico en 449.3 MHz
+
+# timeout 15
+# delay 200
+
+# === Zoom fino alrededor de 449.3 MHz ===
+scan 1 448.0 451.0 0.01
+# wait 3
+stoprx
+# wait 1
+
+# === Segundo scan (confirmar si el pico es estable) ===
+scan 1 448.0 451.0 0.01
+# wait 3
+stoprx
+# wait 1
+
+# === Tercer scan ===
+scan 1 448.0 451.0 0.01
+# wait 3
+stoprx
+# wait 1
+
+# === Autodetect en 449.3 MHz ===
+# timeout 45
+autodetect 1 449.30
+# wait 2
+stoprx
+# wait 1
+
+# === RX OOK BW estrecho 15s ===
+# timeout 20
+rx 1 449.30 203 2 47.6 4
+# wait 15
+stoprx
+# wait 1
+
+# === RX 2-FSK BW estrecho 15s ===
+rx 1 449.30 203 0 47.6 4
+# wait 15
+stoprx

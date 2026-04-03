@@ -1,0 +1,141 @@
+# spy-detect.ecrf — Deteccion de microfonos espia / dispositivos RF ocultos
+# Escaneo dirigido a frecuencias tipicas de bugs RF + autodetect + RX capture
+# Multiples pasadas para pillar transmisores intermitentes
+
+# timeout 20
+# delay 200
+
+# ============================================================
+# PASADA 1: Scan fino 433 MHz (dispositivos espia baratos EU)
+# ============================================================
+scan 1 433.0 435.0 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# PASADA 2: Scan fino 868 MHz (IoT/alarmas/espia EU)
+# ============================================================
+scan 1 867.0 869.5 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# PASADA 3: Scan fino 315 MHz (bugs baratos NA)
+# ============================================================
+scan 1 314.0 316.0 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# PASADA 4: Scan fino 418 MHz (frecuencia comun bugs audio)
+# ============================================================
+scan 1 417.0 419.0 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# PASADA 5: Scan fino 390-395 MHz (bugs profesionales)
+# ============================================================
+scan 1 390.0 395.0 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# AUTODETECT en frecuencias clave (12 combinaciones mod/bw cada una)
+# Detecta cualquier modulacion: OOK, 2-FSK, 4-FSK, GFSK
+# ============================================================
+
+# timeout 40
+
+# 433.920 MHz — la mas comun para bugs baratos
+autodetect 1 433.92
+# wait 2
+stoprx
+# wait 1
+
+# 434.000 MHz
+autodetect 1 434.00
+# wait 2
+stoprx
+# wait 1
+
+# 433.420 MHz — frecuencia alternativa bugs audio
+autodetect 1 433.42
+# wait 2
+stoprx
+# wait 1
+
+# 868.350 MHz — ISM EU principal
+autodetect 1 868.35
+# wait 2
+stoprx
+# wait 1
+
+# 868.000 MHz
+autodetect 1 868.00
+# wait 2
+stoprx
+# wait 1
+
+# 315.000 MHz — bugs NA
+autodetect 1 315.00
+# wait 2
+stoprx
+# wait 1
+
+# 418.000 MHz — frecuencia bugs audio
+autodetect 1 418.00
+# wait 2
+stoprx
+# wait 1
+
+# 390.000 MHz — bugs profesionales
+autodetect 1 390.00
+# wait 2
+stoprx
+# wait 1
+
+# ============================================================
+# PASADA 6: Repetir scan 433 MHz (pillar intermitentes)
+# ============================================================
+
+# timeout 20
+scan 1 433.0 435.0 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# PASADA 7: Repetir scan 868 MHz
+# ============================================================
+scan 1 867.0 869.5 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# RX CAPTURE: escuchar 10s en 433.92 OOK (BW estrecho 203 kHz)
+# Si hay un bug transmitiendo, lo captura
+# ============================================================
+
+# timeout 15
+rx 1 433.92 203 2 47.6 4
+# wait 10
+stoprx
+# wait 1
+
+# RX CAPTURE: escuchar 10s en 868.35 OOK (BW estrecho)
+rx 1 868.35 203 2 47.6 4
+# wait 10
+stoprx
+# wait 1
+
+# RX CAPTURE: escuchar 10s en 433.92 FSK (BW estrecho)
+rx 1 433.92 203 0 47.6 4
+# wait 10
+stoprx

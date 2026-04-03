@@ -1,0 +1,155 @@
+# spy-detect2.ecrf — Deteccion de dispositivos RF ocultos (v2.11)
+# Scan fino + autodetect en frecuencias tipicas de bugs/espias
+
+# timeout 15
+# delay 200
+
+# ============================================================
+# SCAN FINO: 433 MHz (bugs baratos EU, sensores, mandos)
+# ============================================================
+scan 1 433.0 435.0 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# SCAN FINO: 868 MHz (IoT EU, alarmas, bugs)
+# ============================================================
+scan 1 867.0 869.5 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# SCAN FINO: 315 MHz (bugs baratos NA)
+# ============================================================
+scan 1 314.0 316.0 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# SCAN FINO: 418 MHz (bugs audio RF)
+# ============================================================
+scan 1 417.0 419.0 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# SCAN FINO: 390-395 MHz (bugs profesionales)
+# ============================================================
+scan 1 390.0 395.0 0.02
+# wait 3
+stoprx
+# wait 1
+
+# ============================================================
+# AUTODETECT — prueba 12 combinaciones mod/bw en cada frecuencia
+# Timeout 3s x 12 = ~36s por frecuencia
+# ============================================================
+
+# timeout 45
+
+# --- 433 MHz banda ---
+autodetect 1 433.92
+# wait 2
+stoprx
+# wait 1
+
+autodetect 1 433.42
+# wait 2
+stoprx
+# wait 1
+
+autodetect 1 434.00
+# wait 2
+stoprx
+# wait 1
+
+# --- 868 MHz banda ---
+autodetect 1 868.00
+# wait 2
+stoprx
+# wait 1
+
+autodetect 1 868.35
+# wait 2
+stoprx
+# wait 1
+
+# --- 315 MHz ---
+autodetect 1 315.00
+# wait 2
+stoprx
+# wait 1
+
+# --- 418 MHz ---
+autodetect 1 418.00
+# wait 2
+stoprx
+# wait 1
+
+# --- 390 MHz ---
+autodetect 1 390.00
+# wait 2
+stoprx
+# wait 1
+
+# ============================================================
+# RX CAPTURE con BW estrecho (203 kHz = max sensibilidad)
+# 15s de escucha en cada frecuencia clave
+# ============================================================
+
+# timeout 20
+
+# 433.92 OOK estrecho
+rx 1 433.92 203 2 47.6 4
+# wait 15
+stoprx
+# wait 1
+
+# 433.92 2-FSK estrecho
+rx 1 433.92 203 0 47.6 4
+# wait 15
+stoprx
+# wait 1
+
+# 868.35 OOK estrecho
+rx 1 868.35 203 2 47.6 4
+# wait 15
+stoprx
+# wait 1
+
+# 868.35 2-FSK estrecho
+rx 1 868.35 203 0 47.6 4
+# wait 15
+stoprx
+# wait 1
+
+# 315.00 OOK estrecho
+rx 1 315.00 203 2 47.6 4
+# wait 15
+stoprx
+# wait 1
+
+# 418.00 OOK estrecho
+rx 1 418.00 203 2 47.6 4
+# wait 15
+stoprx
+# wait 1
+
+# ============================================================
+# SEGUNDA PASADA scans (detectar intermitentes)
+# ============================================================
+
+# timeout 15
+
+scan 1 433.0 435.0 0.02
+# wait 3
+stoprx
+# wait 1
+
+scan 1 867.0 869.5 0.02
+# wait 3
+stoprx

@@ -1,0 +1,38 @@
+# rf-detect.ecrf — Detector de dispositivos RF ocultos
+# Barrido ISM con reinicio de modulo entre bandas
+
+# timeout 15
+# delay 300
+
+# === Banda baja: 300-348 MHz ===
+scan 1 300.0 348.0 0.5
+# wait 2
+stoprx
+# wait 1
+
+# === Banda media: 390-464 MHz ===
+scan 1 390.0 464.0 0.5
+# wait 2
+stoprx
+# wait 1
+
+# === Banda alta: 779-928 MHz ===
+scan 1 779.0 928.0 0.5
+# wait 2
+stoprx
+# wait 1
+
+# === Zoom 433 MHz (paso fino) ===
+scan 1 432.0 436.0 0.05
+# wait 2
+stoprx
+# wait 1
+
+# === Zoom 868 MHz ===
+scan 1 866.0 870.0 0.05
+# wait 2
+stoprx
+# wait 1
+
+# === Zoom 315 MHz ===
+scan 1 314.0 316.0 0.05

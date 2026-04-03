@@ -6,7 +6,7 @@ desde terminal USB/serie, sin necesidad de WiFi ni panel web.
 Basado en el firmware original de
 [joelsernamoreno/EvilCrowRF-V2](https://github.com/joelsernamoreno/EvilCrowRF-V2).
 
-**Versión del firmware:** v2.9 | **Cliente Python:** ecrf-serial.py v2.1
+**Versión del firmware:** v2.12 | **Cliente Python:** ecrf-serial.py v2.3
 
 ---
 
@@ -247,6 +247,68 @@ El log se guarda con timestamps relativos `[MM:SS.mmm]` en cada entrada:
 [00:06.145] RECV: {"status":"ok","cmd":"stoprx","msg":"RX detenido"}
 ```
 
+### Modo monitor — captura continua desatendida
+
+Conecta, arma RX automáticamente y muestra sólo las líneas de interés.
+Cada señal capturada se guarda en un fichero independiente sin intervención manual.
+
+```bash
+# Autodetecta puerto, arma rx 1 433.92 812 0 47.6 4
+python3 ecrf-serial.py --monitor
+
+# Puerto explícito
+python3 ecrf-serial.py --monitor /dev/ttyUSB0
+```
+
+**Qué hace:**
+
+| Acción | Detalle |
+|--------|---------|
+| Arma RX | Envía `rx 1 433.92 812 0 47.6 4` automáticamente al conectar |
+| Filtra salida | Muestra sólo líneas `[RX*`, `OK: RELAY`, `FOUND:` con timestamp |
+| Guarda señales | Cada captura → `~/evilcrow/captures/<ISO_timestamp>.txt` |
+| Parada limpia | Ctrl+C envía `stoprx` antes de cerrar |
+
+**Salida típica en terminal:**
+
+```
+[*] Monitor activo en /dev/ttyUSB0
+[*] Capturas en:   /home/user/evilcrow/captures
+[*] Comando:       rx 1 433.92 812 0 47.6 4
+[*] Filtro:        [RX* | OK: RELAY | FOUND:
+[*] Ctrl+C para detener
+
+[21:04:12.301] [RX-RAW-BEGIN]
+[21:04:12.302] [RX-RAW-END]
+[21:04:12.318] [SAVED] /home/user/evilcrow/captures/20260330T210412.txt
+[21:04:45.910] [RX-RAW-BEGIN]
+[21:04:45.911] [RX-RAW-END]
+[21:04:45.926] [SAVED] /home/user/evilcrow/captures/20260330T210445.txt
+
+[21:05:03.000] [*] Ctrl+C — enviando stoprx...
+```
+
+**Contenido del fichero de captura guardado** (`<ISO_timestamp>.txt`):
+
+```
+[RX-RAW-BEGIN]
+Count=128
+300,900,300,900,600,200,300,900,...
+[RX-RAW-END]
+[ANALYSIS-BEGIN]
+BITS=01010110...
+SAMPLES_PER_SYMBOL=300
+PAUSES=[{"pos":64,"us":9600}]
+[CORRECTED-BEGIN]
+Count=44
+300,900,...
+[CORRECTED-END]
+[ANALYSIS-END]
+```
+
+El fichero incluye los bloques `[RX-RAW-*]` y `[ANALYSIS-*]` completos para
+importación directa en URH u otras herramientas de análisis.
+
 ### Con cualquier terminal serie
 
 ```bash
@@ -258,8 +320,8 @@ minicom -b 115200 -D /dev/ttyUSB0
 Al conectar verás:
 
 ```
-{"event":"ready","fw":"2.9","msg":"Evil Crow RF listo","hint":"Escribe help"}
-ECRF>
+{"event":"ready","fw":"2.12","msg":"Evil Crow RF listo","hint":"Escribe help"}
+ECRF[IDLE]>
 ```
 
 ---
@@ -304,9 +366,14 @@ scan <module> <start> <end> <step>  Escaneo RSSI frecuencia a frecuencia
   frecuencias en MHz, máximo 500 pasos
   ej: scan 1 433.0 435.0 0.1
 replay <module>                     Retransmitir última señal capturada
-save <name>                         Guardar configuración en LittleFS (/cfg_<name>.cfg)
-load <name>                         Cargar configuración desde LittleFS
+save <name>                         Guardar configuración en /profiles/<name>.json
+load <name>                         Cargar perfil JSON; fallback a /cfg_<name>.cfg (legado)
   name: alfanumérico, guiones y guiones bajos, máximo 20 caracteres
+
+profiles                            Listar perfiles guardados en /profiles/
+  Formato: <name>  (N bytes)  por perfil + total al final
+
+profile-del <name>                  Eliminar /profiles/<name>.json
 
 export <name> <format>              Exportar última señal capturada
   name:   last  (última captura en RAM)
@@ -363,8 +430,9 @@ info                                Espacio total, usado y libre de LittleFS
   Emite OK: info total=… used=… free=… used_pct=… files=N
   y JSON {"event":"fs_info",…}
 
-save <name>                         (mejorado en v2.6)
+save <name>                         (mejorado en v2.6, ruta actualizada en v2.10)
   Avisa con OK: save overwriting existing path=… antes de sobreescribir
+  Escribe en /profiles/<name>.json (formato JSON); no en /cfg_<name>.cfg
 
 autodetect <module> <freq>          Detectar modulación y BW automáticamente (v2.7)
   module: 1 | 2
@@ -396,6 +464,36 @@ brute <module> <freq> <bits> <delay_ms>   Transmitir todos los códigos posibles
 stopbrute                           Detiene un brute en curso
   Escribe 'stopbrute' mientras brute está ejecutándose
   También funciona como comando normal si brute ya terminó (no-op)
+
+chat-start <module> <freq> <addr>   Activa modo chat en modo paquete CC1101 (v2.11)
+  module: 1 | 2
+  freq:   MHz  ej: 433.92
+  addr:   dirección propia 1–254
+  Configura GFSK 4800 baud, sync=0xD391, longitud variable, CRC on, filtro por addr
+  Ambos módulos pueden estar activos simultáneamente en frecuencias distintas
+  Mensajes recibidos aparecen como: [CHAT:<from_addr>] texto
+
+msg <module> <dest_addr> <texto>    Transmite un paquete de texto al destino (v2.11/v2.12)
+  module:    1 | 2
+  dest_addr: 1–254 (unicast) | 255 (broadcast 0xFF → wire 0x00)
+  texto:     hasta 55 caracteres
+  Paquete v2: [DEST][FROM][SEQ][TTL=3][texto]  — 4 bytes cabecera
+  Re-arma recepción automáticamente tras transmitir
+
+chat-stop <module>                  Detiene el modo chat en el módulo indicado (v2.11)
+  Pone el módulo en IDLE y libera el estado chat
+
+broadcast <module> <texto>          Envia mensaje a todos los nodos (v2.12)
+  Equivale a msg con dest=0xFF (broadcast wire 0x00)
+  TTL=3: se propaga hasta 3 saltos via chat-relay
+  texto: hasta 55 caracteres
+
+chat-relay <rx_module>              Relay de paquetes mod1→mod2 o mod2→mod1 (v2.12)
+  rx_module: módulo que escucha (1 | 2); retransmite por el otro módulo
+  Requiere ambos módulos activos con chat-start
+  Decrementa TTL en cada salto; descarta paquetes con TTL≤1
+  De-duplicación por (FROM_ADDR, SEQ): no retransmite paquetes ya vistos
+  Emite: [RELAY: from=X seq=Y ttl=Z via=modN] por cada paquete relayado
 ```
 
 ### Prompt dinámico (v2.9)
@@ -451,11 +549,22 @@ ECRF> registers 1
 # Escanear de 433 a 435 MHz en pasos de 0.1
 ECRF> scan 1 433.0 435.0 0.1
 
-# Guardar configuración actual
+# Cargar perfil predefinido (creado en setup())
+ECRF> load default433
+ECRF> load default868
+ECRF> load fsk433
+
+# Guardar configuración actual como perfil JSON
 ECRF> save garaje433
 
-# Cargar en otra sesión
+# Cargar perfil en otra sesión
 ECRF> load garaje433
+
+# Listar perfiles disponibles
+ECRF> profiles
+
+# Eliminar un perfil
+ECRF> profile-del garaje433
 
 # Jammer en 433 MHz con potencia máxima
 ECRF> jammer 1 433.92 10
@@ -515,6 +624,35 @@ ECRF[IDLE]> rx 1 433.92 812 2 47.6 4     # tras rx → prompt cambia a RX
 ECRF[RX:1@433.92]> stoprx                # tras stoprx → vuelve a IDLE
 ECRF[IDLE]> jammer 1 433.92 10           # tras jammer → prompt cambia a JAM
 ECRF[JAM:1]> stopjammer                  # tras stopjammer → vuelve a IDLE
+
+# Modo chat: dos módulos en frecuencias distintas simultáneamente
+ECRF[IDLE]> chat-start 1 433.92 10
+OK: chat-start module=1 freq=433.92000 addr=10 sync=0xD391 mod=GFSK rate=4.8kbps
+ECRF[IDLE]> chat-start 2 868.35 10
+OK: chat-start module=2 freq=868.35000 addr=10 sync=0xD391 mod=GFSK rate=4.8kbps
+
+# Enviar un mensaje unicast (el receptor tiene addr=20)
+ECRF[IDLE]> msg 1 20 hola desde mod1
+OK: msg from=10 to=20 seq=0 len=16 module=1
+
+# Broadcast a todos los nodos (0xFF → wire 0x00)
+ECRF[IDLE]> broadcast 1 aviso para todos
+OK: broadcast from=10 seq=1 len=17 ttl=3 module=1
+
+# Mensajes recibidos aparecen automáticamente (desde cualquier remitente)
+[CHAT:20] hola de vuelta
+[CHAT:30] broadcast recibido
+
+# Modo relay: nodo intermediario entre dos Evil Crow (ambos módulos en chat)
+ECRF[IDLE]> chat-relay 1
+OK: chat-relay enabled rx=mod1 tx=mod2 ttl_init=3
+[RELAY: from=5 seq=7 ttl=2 via=mod2]
+
+# Detener chat en ambos módulos
+ECRF[IDLE]> chat-stop 1
+OK: chat-stop module=1
+ECRF[IDLE]> chat-stop 2
+OK: chat-stop module=2
 ```
 
 ---
@@ -663,6 +801,97 @@ ECRF[JAM:2]>          ← rojo   (módulo 2 en modo jammer)
 Retrocompatibilidad: si el dispositivo emite el prompt legacy `ECRF> ` (firmware
 < v2.9), el cliente lo detecta igualmente y lo muestra sin colorizar.
 
+### Chat mode (`chat-start`, `msg`, `broadcast`, `chat-relay`, `chat-stop`)
+
+Inicio de chat en módulo 1:
+
+```
+ECRF> chat-start 1 433.92 42
+OK: chat-start module=1 freq=433.92000 addr=42 sync=0xD391 mod=GFSK rate=4.8kbps
+```
+
+Envío de mensaje unicast (v2.12: incluye `seq=` en la respuesta):
+
+```
+ECRF> msg 1 99 hola mundo
+OK: msg from=42 to=99 seq=0 len=10 module=1
+```
+
+Broadcast a todos los nodos:
+
+```
+ECRF> broadcast 1 aviso para todos
+OK: broadcast from=42 seq=1 len=17 ttl=3 module=1
+```
+
+Mensajes recibidos (emitidos por `loop()` sin comando explícito):
+
+```
+[CHAT:99] respuesta recibida
+[CHAT:5] mensaje de broadcast
+```
+
+Relay entre módulos (nodo intermediario de malla):
+
+```
+ECRF> chat-relay 1
+OK: chat-relay enabled rx=mod1 tx=mod2 ttl_init=3
+
+# Por cada paquete relayado:
+[RELAY: from=5 seq=3 ttl=2 via=mod2]
+```
+
+Parada:
+
+```
+ECRF> chat-stop 1
+OK: chat-stop module=1
+```
+
+Errores:
+
+```
+ERR: chat-start addr_invalid range=1-254
+ERR: chat-start raw_rx_active on this module - use stoprx first
+ERR: msg chat_not_active module=1
+ERR: msg text_empty
+ERR: broadcast chat_not_active module=1
+ERR: broadcast text_empty
+ERR: chat-relay chat_not_active on rx module=1
+ERR: chat-relay chat_not_active on tx module=2
+ERR: chat-stop chat_not_active module=2
+```
+
+Flujo completo de red de 3 nodos (A→relay→B):
+
+```
+# Nodo A (addr=10): envía a nodo B (addr=30) pasando por relay (addr=20)
+# Nodo B tiene chat-start 1 433.92 30 + chat-start 2 868.35 30
+# Relay tiene chat-start 1 433.92 20 + chat-start 2 868.35 20 + chat-relay 1
+
+# En nodo A:
+ECRF> msg 1 30 hola con salto
+OK: msg from=10 to=30 seq=0 len=14 module=1
+
+# En relay (automático, sin intervención):
+[RELAY: from=10 seq=0 ttl=2 via=mod2]
+
+# En nodo B (recibe el paquete relayado):
+[CHAT:10] hola con salto
+```
+
+| Campo | Descripción |
+|-------|-------------|
+| `addr` | Dirección propia 1–254; CC1101 filtra por dirección + 0x00 broadcast |
+| `sync=0xD391` | Palabra de sincronía fija para todos los nodos del mismo canal |
+| `mod=GFSK rate=4.8kbps` | GFSK, desvío 19.04 kHz, BW 101.5 kHz, 4800 baud |
+| `CHAT_MAX_TEXT=55` | Máx. texto (FIFO 64 − 1 length − 4 hdr − 2 CRC = 57, conservador 55) |
+| `[DEST][FROM][SEQ][TTL][texto]` | Formato paquete v2: 4 bytes cabecera + texto |
+| `SEQ` | Número de secuencia 0–255 por emisor; detecta duplicados en relay |
+| `TTL` | Saltos restantes: inicial=3, decrementado en cada relay, descartado con TTL≤1 |
+| `0xFF→0x00` | Broadcast: addr 0xFF visible al usuario se envía como 0x00 en el wire |
+| `chatSeen[16]` | Buffer circular de (FROM, SEQ) para de-duplicación en nodos relay |
+
 ### Brute force (`brute`, `stopbrute`)
 
 Inicio y progreso:
@@ -751,32 +980,83 @@ ERR: autodetect no_signal_found freq=433.92000
 ```
 [LIST-BEGIN]
 /logs.txt size=4096 date=2026-03-30T12:00:00
-/cfg_garaje433.cfg size=82 date=2026-03-30T11:45:00
-[LIST-END count=2]
-OK: list files=2
+/profiles/default433.json size=98 date=2026-03-30T11:45:00
+/profiles/garaje433.json size=98 date=2026-03-30T12:10:00
+[LIST-END count=3]
+OK: list files=3
 ```
 
 ```
-[FILE-BEGIN path=/cfg_garaje433.cfg size=82]
-freq=433.920000
-bw=812.000
-mod=2
-dev=47.600
-rate=4
-power=10
-module=1
-
-[FILE-END]
-OK: show path=/cfg_garaje433.cfg size=82
+OK: deleted path=/profiles/garaje433.json
+OK: renamed /profiles/garaje433.json -> /profiles/garaje_nuevo.json
+OK: save overwriting existing path=/profiles/garaje433.json
+OK: info total=1441792 used=4096 free=1437696 used_pct=0 files=3
+{"event":"fs_info","total":1441792,"used":4096,"free":1437696,"used_pct":0,"files":3}
 ```
 
+### Perfiles JSON (`save`, `load`, `profiles`, `profile-del`)
+
+Desde v2.10 las configuraciones se guardan en `/profiles/<name>.json` como JSON válido:
+
 ```
-OK: deleted path=/cfg_garaje433.cfg
-OK: renamed /cfg_garaje433.cfg -> /cfg_garaje_nuevo.cfg
-OK: save overwriting existing path=/cfg_garaje433.cfg
-OK: info total=1441792 used=4096 free=1437696 used_pct=0 files=2
-{"event":"fs_info","total":1441792,"used":4096,"free":1437696,"used_pct":0,"files":2}
+ECRF[IDLE]> save garaje433
+OK: saved path=/profiles/garaje433.json freq=433.92000 bw=812.000 mod=2 dev=47.600 rate=4 power=10
 ```
+
+Contenido del archivo JSON generado:
+
+```json
+{
+"freq": 433.920000,
+"bw": 812.000,
+"mod": 2,
+"dev": 47.600,
+"rate": 4,
+"power": 10,
+"module": "1"
+}
+```
+
+Carga de perfil (prueba JSON primero, fallback a formato legado `.cfg`):
+
+```
+ECRF[IDLE]> load garaje433
+OK: loaded path=/profiles/garaje433.json freq=433.92000 bw=812.000 mod=2 dev=47.600 rate=4 power=10 module=1
+```
+
+```
+ECRF[IDLE]> load viejo_cfg       ← solo existe /cfg_viejo_cfg.cfg
+OK: loaded path=/cfg_viejo_cfg.cfg freq=433.92000 bw=812.000 mod=2 dev=47.600 rate=4 power=10 module=1
+```
+
+Listado de perfiles:
+
+```
+ECRF[IDLE]> profiles
+OK: profiles:
+  default433  (98 bytes)
+  default868  (98 bytes)
+  fsk433  (98 bytes)
+  garaje433  (98 bytes)
+OK: profiles total=4
+```
+
+Eliminación de un perfil:
+
+```
+ECRF[IDLE]> profile-del garaje433
+OK: profile-del deleted path=/profiles/garaje433.json
+```
+
+**Perfiles predefinidos** creados automáticamente en el primer arranque:
+
+| Nombre | Frecuencia | Modulación | BW | Descripción |
+|--------|-----------|------------|----|-------------|
+| `default433` | 433.92 MHz | OOK (2) | 812 kHz | Mandos de garaje, sensores típicos 433 |
+| `default868` | 868.35 MHz | OOK (2) | 812 kHz | Sensores IoT, alarmas EU 868 |
+| `fsk433` | 433.92 MHz | 2-FSK (0) | 812 kHz | Termómetros, medidores FSK 433 |
+
+Los perfiles predefinidos no se sobreescriben en arranques posteriores (solo se crean si no existen).
 
 ### Volcado de registros (`registers`)
 
@@ -905,16 +1185,17 @@ evilcrow/
 ├── setup_evilcrow_rf.sh             Script de instalación y build
 ├── scripts/
 │   └── example.ecrf                 Script de ejemplo: rx + stoprx + log
-├── captures/                        Señales exportadas (export last urh/rtl)
-│   └── YYYYMMDD_HHMMSS.urh.txt
-│   └── YYYYMMDD_HHMMSS.json
+├── captures/                        Señales capturadas y exportadas
+│   ├── YYYYMMDD_HHMMSS.urh.txt      export last urh
+│   ├── YYYYMMDD_HHMMSS.json         export last rtl
+│   └── YYYYMMDDTHHmmss.txt          --monitor (captura automática)
 ├── build/
 │   ├── firmware.ino.bin             Binario listo para flashear
 │   ├── firmware.ino.bootloader.bin
 │   └── firmware.ino.partitions.bin
-├── EvilCrow-RF/                     Firmware v2.9 (modificado)
+├── EvilCrow-RF/                     Firmware v2.12 (modificado)
 │   └── firmware/
-│       ├── firmware.ino             ← Sketch principal v2.9
+│       ├── firmware.ino             ← Sketch principal v2.12
 │       ├── ELECHOUSE_CC1101_SRC_DRV.h
 │       └── ELECHOUSE_CC1101_SRC_DRV.cpp
 └── EvilCrowRF-V2/                   Repo V2 original (referencia)
@@ -940,8 +1221,20 @@ evilcrow/
 | v2.7 | Comando `autodetect <module> <freq>`: descubrimiento automático de modulación y BW — prueba 4 modulaciones (OOK → 2-FSK → 4-FSK → GFSK) × 3 anchos de banda (812 → 406 → 203 kHz) = 12 combinaciones, timeout 3 s por combo; emite `TRY: mod=X bw=Y` en cada intento, `FOUND: mod=X bw=Y rate=Z` + JSON `autodetect_found` al capturar señal, `AUTODETECT-LISTO` como marcador de finalización; actualiza globals automáticamente para que `replay`/`analyze`/`export` funcionen sin configuración adicional; corrección: `detachInterrupt(rx_pin)` incondicional para evitar interrupt colgado en módulo 2 al capturar con `relayActive=true` |
 | v2.8 | Comandos `brute <module> <freq> <bits> <delay_ms>` y `stopbrute`: transmisor de fuerza bruta — genera y transmite secuencialmente todos los 2^bits códigos posibles (máx. 24 bits = 16 777 216 códigos) con encoding OOK MSB primero (bit1=600µs/200µs, bit0=200µs/600µs); progreso cada 1000 códigos con `BRUTE: n/total ultimo=0xHHH`; `stopbrute` detectable durante el loop vía polling Serial en cada pausa inter-código; `yield()` por iteración para compatibilidad con WDT de FreeRTOS; `ERR:` si bits > 24; emite `BRUTE-LISTO` al finalizar (completo o detenido) |
 | v2.9 | Prompt contextual dinámico: `printPrompt()` reemplaza el `ECRF> ` estático con `ECRF[IDLE]> `, `ECRF[RX:<mod>@<freq>]> ` o `ECRF[JAM:<mod>]> ` según `raw_rx`/`jammer_tx`/`tmp_module`/`frequency`; 17 puntos de impresión actualizados; en `ecrf-serial.py`: `PROMPT_RE` + `_color_prompt()` parsean y colorean el prompt (azul=IDLE, verde=RX, rojo=JAM), `_device_state` actualizado atómicamente por el hilo lector, `_live_prompt()` para `input()` en modo interactivo; retrocompatibilidad con firmware < v2.9 mediante `PROMPT_LEGACY` |
+| v2.10 | Sistema de perfiles JSON: `save <name>` ahora escribe `/profiles/<name>.json` (JSON válido con todos los parámetros CC1101: freq, bw, mod, dev, rate, power, module); `load <name>` carga JSON con fallback automático a `/cfg_<name>.cfg` para compatibilidad con perfiles guardados en v2.1–v2.9; nuevo comando `profiles` lista `/profiles/*.json` con nombre y tamaño; nuevo comando `profile-del <name>` elimina un perfil; `setup()` crea 3 perfiles predefinidos en el primer arranque: `default433` (433.92/OOK), `default868` (868.35/OOK), `fsk433` (433.92/2-FSK); helper `writeProfileJson()` reutilizado tanto por `save` como por la creación de perfiles predefinidos |
+| v2.11 | Modo chat sobre CC1101 en modo paquete: `chat-start <module> <freq> <addr>` configura GFSK 4800 baud, sync=0xD391, longitud variable, CRC on, filtro por dirección; `msg <module> <dest_addr> <texto>` transmite paquete con cabecera `[DEST_ADDR][FROM_ADDR][texto]` (hasta 58 bytes de texto, límite FIFO CC1101); mensajes recibidos emitidos como `[CHAT:<from_addr>] texto` desde el bucle principal sin comando explícito; `chat-stop <module>` pone el módulo en IDLE y libera estado; ambos módulos pueden estar en modo chat simultáneamente en frecuencias distintas; `struct ChatState { active, myAddr, freq }` por módulo; guard anti-conflicto con `raw_rx` ISR activo |
+| v2.12 | Malla mesh sin infraestructura: paquete v2 con 4 bytes de cabecera `[DEST][FROM][SEQ][TTL]`; `broadcast <module> <texto>` envía a addr 0xFF (→ wire 0x00) con TTL=3; `chat-relay <rx_module>` retransmite vía el otro módulo con TTL decrementado (hasta 3 saltos); de-duplicación por (FROM, SEQ) con buffer circular `chatSeen[16]`; `msg` actualizado con campo `seq=` en respuesta y soporte `dest=255` broadcast; `CHAT_MAX_TEXT` reducido de 58 a 55 para acomodar 2 bytes extra de cabecera; `struct ChatState` ampliado con `seqTx`, `relayEnabled` |
 
 El detalle de los 20 gaps resueltos y las optimizaciones de memoria están en [`GAPS.md`](GAPS.md).
+
+### Historial de versiones del cliente Python
+
+| Versión | Cambios |
+|---------|---------|
+| v2.0 | Cliente interactivo con historial readline, detección automática de puerto, eco de caracteres |
+| v2.1 | Modo batch (`.ecrf`), log con timestamps relativos, guardado automático de bloques `[EXPORT-*]`, modo debug y brute soportados |
+| v2.2 | Modo monitor (`--monitor [PORT]`): arma RX automáticamente, filtra `[RX*`/`OK: RELAY`/`FOUND:` con timestamp, guarda cada señal en `~/evilcrow/captures/<ISO_timestamp>.txt`, Ctrl+C envía `stoprx` antes de cerrar |
+| v2.3 | Modo chat (`--chat [PORT] FREQ MI_ADDR`): envía `chat-start 1 FREQ MI_ADDR` automáticamente, pide `dest_addr` al inicio, mensajes `[CHAT:X]` en azul con timestamp `[HH:MM]`, confirmaciones `OK: msg` en verde y `ERR:` en rojo, soporte `@<addr> texto` para cambiar destino al vuelo, Ctrl+C envía `chat-stop 1` antes de cerrar |
 
 ---
 
@@ -1088,8 +1381,105 @@ sudo usermod -aG dialout $USER
 - En Windows PowerShell ejecuta `[Console]::OutputEncoding = [Text.Encoding]::UTF8`
   y activa ANSI con `Set-ItemProperty HKCU:\Console VirtualTerminalLevel 1`
 
+**`load default433` devuelve `ERR: load file_not_found`**
+- Los perfiles predefinidos se crean en `setup()` la primera vez; si el dispositivo
+  arrancó con una versión anterior (<v2.10) el directorio `/profiles/` no existe todavía
+- Solución: `reboot` (o desconectar y reconectar) para que `setup()` los cree
+
+**`load garaje433` carga bien pero `save garaje433` sobreescribe la ruta antigua**
+- No hay ruta antigua: desde v2.10 `save` solo escribe en `/profiles/<name>.json`;
+  el archivo `/cfg_garaje433.cfg` sigue existiendo en LittleFS pero `load` ya no lo
+  actualiza — usa `delete cfg_garaje433.cfg` si quieres liberar el espacio
+
+**`profiles` muestra `(ninguno)` aunque hice `save` antes**
+- Verifica que el `save` devolvió `OK:` (no `ERR:`); si el FS está lleno el archivo
+  no se crea
+- Usa `info` para ver el espacio libre; usa `list` para ver si el archivo existe
+  bajo `/profiles/`
+
+**`profile-del` devuelve `ERR: profile-del not_found`**
+- El comando solo borra `/profiles/<name>.json`; para borrar archivos legados
+  (`.cfg`) usa `delete cfg_<name>.cfg`
+- Usa `profiles` para ver los nombres exactos disponibles
+
 **El prompt muestra `ECRF[RX:1@433.92]>` pero hay `stoprx` activo**
 - El firmware actualiza `raw_rx = "0"` dentro de `processSerialCommand()`, y el prompt
   se emite al FINAL del mismo; si el comando `stoprx` actualiza el estado correctamente
   el prompt que sigue a `stoprx` debe mostrar `ECRF[IDLE]>`; si no es así, verifica
   que no hay otro comando activo rearmando el receptor (relay/bridge)
+
+**`--monitor` no muestra nada tras arrancar**
+- El modo monitor sólo imprime líneas que empiecen por `[RX`, `OK: RELAY` o `FOUND:`
+- Las respuestas del firmware al comando `rx` (JSON `{"status":"ok",...}`) se filtran —
+  esto es normal; espera a que llegue una señal y verás `[RX-RAW-BEGIN]`
+- Verifica que hay señal en la frecuencia: prueba en modo interactivo con
+  `rx 1 433.92 812 0 47.6 4` y comprueba si aparece `[RX-RAW-BEGIN]`
+
+**`--monitor` no guarda ficheros aunque aparezca `[RX-RAW-BEGIN]`**
+- El fichero se guarda al recibir `[ANALYSIS-END]` (captura completa) o el prompt
+  del firmware (captura sin análisis); si el firmware no emite análisis (`signalanalyse`
+  falla por pocas muestras) y tampoco llega el prompt, el fichero no se escribe
+- En ese caso el buffer se descarta cuando llega el siguiente `[RX-RAW-BEGIN]`
+- Solución: acerca el emisor para capturar más muestras
+
+**`--monitor` guarda el fichero pero está vacío o incompleto**
+- Si `Ctrl+C` llega justo durante la recepción del bloque, el buffer puede estar
+  incompleto; el cliente guarda igualmente si ya recibió `[RX-RAW-END]`
+- Usa `show /profiles/...` o inspecciona el fichero con cualquier editor de texto
+
+**`--monitor /dev/ttyUSB0` devuelve `[!] Error al abrir`**
+- Mismo diagnóstico que en modo interactivo: permisos (`dialout`), cable, driver
+- El modo monitor no tiene ningún requisito de puerto adicional respecto al modo
+  interactivo
+
+**`chat-start` devuelve `ERR: chat-start raw_rx_active`**
+- Hay un `rx` ISR activo en ese módulo; envía `stoprx` antes de activar el chat
+- El modo chat usa polling CC1101, incompatible con el ISR de tiempo de vuelo
+
+**`msg` devuelve `ERR: msg chat_not_active module=1`**
+- El módulo no tiene chat activo; ejecuta `chat-start 1 <freq> <addr>` primero
+- Verifica con `config` si el módulo responde (`cc1101_module1=present`)
+
+**`[CHAT:X]` no aparece aunque el otro nodo transmita**
+- Verifica que ambos nodos usan la misma frecuencia, mismo sync (0xD391) y misma configuración RF (GFSK 4800 baud); el firmware fija estos parámetros en `chat-start`
+- Verifica que el addr del emisor coincide con el `dest_addr` del mensaje O con 0x00 (broadcast); si no coincide, el CC1101 receptor descarta el paquete en hardware
+- Confirma que el módulo receptor está en modo chat: `[CHAT:]` solo se imprime si `chatState[módulo].active == true`
+- Usa `debug on` + `chat-start` y observa los `DBG:` del `Init()` para confirmar que el módulo SPI responde
+
+**`msg` trunca el texto sin avisar**
+- Desde v2.12 el texto se limita a 55 caracteres (`CHAT_MAX_TEXT=55`); en v2.11 eran 58 (cabecera más pequeña)
+- El campo `len=N` en la respuesta `OK: msg` indica los bytes realmente enviados
+
+**Ambos módulos en chat pero solo uno recibe**
+- El polling de recepción corre en `loop()` para ambos módulos; si `loop()` tarda (brute, scan síncrono), puede perder paquetes cortos
+- No ejecutes operaciones síncronas largas mientras el chat está activo
+
+**`chat-stop` devuelve `ERR: chat-stop chat_not_active`**
+- El módulo ya estaba inactivo (nunca se arrancó o ya se detuvo); no es un error crítico
+- Usa `config` para confirmar el estado actual
+
+**`broadcast` no llega a todos los nodos**
+- El broadcast usa `DEST=0x00` en el wire; los receptores deben tener `chat-start` activo con `setAdrChk(2)` (configurado automáticamente por `chat-start`); verifica que estén en chat mode
+- Si algún nodo usa firmware v2.11, no entenderá el paquete v2 (cabecera de 4 bytes vs 2 bytes del v2.11); todos los nodos deben estar en v2.12
+
+**`chat-relay` devuelve `ERR: chat-relay chat_not_active on tx module=2`**
+- El módulo de TX (el otro) no tiene chat activo; ejecuta `chat-start 2 <freq> <addr>` antes de `chat-relay 1`
+- Ambos módulos deben estar en chat antes de activar el relay
+
+**`[RELAY:]` no aparece aunque haya tráfico**
+- Verifica con `help` que el firmware es v2.12+ (sección "Nuevos en v2.12")
+- El relay solo actúa si el paquete tiene `TTL > 1`; si ya llegó con TTL=1, se entrega pero no se reenvía
+- El relay solo retransmite paquetes NO vistos antes (de-dup por FROM+SEQ); si ya viste ese paquete, no lo relay
+
+**El mismo mensaje aparece dos veces en el receptor relay**
+- El receptor recibe el paquete original Y el relay si ambos módulos están en el mismo canal; la de-duplicación por (FROM, SEQ) previene que el nodo imprima el mensaje dos veces si usa v2.12
+- Si un nodo v2.11 está en la red, no tiene de-dup y puede imprimir duplicados
+
+**`chat-relay` forma bucles infinitos**
+- Imposible con TTL: el TTL inicial es 3 y se decrementa en cada salto; con TTL=0 el paquete se descarta
+- El buffer `chatSeen[16]` también detecta si el nodo ya vio ese (FROM, SEQ) y evita retransmitirlo de nuevo
+- Con 2 nodos relay en el mismo canal, el primero podría escuchar la retransmisión del segundo y detectarla como duplicado (chatSeen) → no relaya de nuevo. Correcto.
+
+**La red mesh no alcanza el nodo final**
+- Cada `chat-relay` añade 1 salto; con `TTL_INIT=3` y 2 nodos relay se llega a 3 saltos (A→R1→R2→B)
+- Si necesitas más saltos: los nodos intermedios deben enviar ellos mismos con TTL recién construido; no hay way automático de extender TTL más allá de 3 en el firmware actual

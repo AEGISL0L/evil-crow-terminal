@@ -1,0 +1,79 @@
+# peak-hunt.ecrf — 3 pasadas completas para correlacionar picos reales
+
+# timeout 20
+# delay 100
+
+# === PASADA 1 ===
+scan 1 300.0 348.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 387.0 437.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 437.0 464.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 779.0 829.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 829.0 879.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 879.0 928.0 0.1
+# wait 2
+stoprx
+# wait 2
+
+# === PASADA 2 ===
+scan 1 300.0 348.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 387.0 437.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 437.0 464.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 779.0 829.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 829.0 879.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 879.0 928.0 0.1
+# wait 2
+stoprx
+# wait 2
+
+# === PASADA 3 ===
+scan 1 300.0 348.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 387.0 437.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 437.0 464.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 779.0 829.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 829.0 879.0 0.1
+# wait 2
+stoprx
+# wait 1
+scan 1 879.0 928.0 0.1
